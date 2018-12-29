@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<title>three.js</title>
+
+	<link rel="shortcut icon" href="#" />
+	<link rel="stylesheet" type="text/css" href="src/style.css">
+</head>
+<body>
+	<canvas
+		id="canvas"
+		oncontextmenu="return false;"
+		tabindex=1>
+	</canvas>
+
+	<div id="pauseMenu">
+		<p>Paused</p>
+		<button>Resume</button>
+		<button>Options</button>
+	</div>
+
+	<div id="debugMenu">
+		<div>Free cam (1): <span id="freeCamLabel">OFF</span></div>
+		<div>Player collision hull (2): <span id="playerCollisionHullLabel">OFF</span></div>
+		<div>Environment tree (3): <span id="environmentTreeLabel">OFF</span></div>
+		<div>Object bounds (4): <span id="objectBoundsLabel">OFF</span></div>
+		<div>Terrain face bounds (5): <span id="terrainFaceBoundsLabel">OFF</span></div>
+	</div>
+
+	<script src="res/three.js-r99/three.min.js"></script>
+	<script src="res/three.js-r99/inflate.min.js"></script>
+	<script src="res/three.js-r99/FBXLoader.js"></script>
+	<script src="res/three.js-r99/OBJLoader.js"></script>
+	<script src="res/three.js-r99/stats.min.js"></script>
+	
+	<script src="src/input.js"></script>
+	<script src="src/utilities.js"></script>
+	<script src="src/collision.js"></script>
+	<script src="src/octree.js"></script>
+	<script src="src/kdTree.js"></script>
+	<script src="src/stage.js"></script>
+	<script src="src/debugController.js"></script>
+	<script src="src/player.js"></script>
+	<script src="src/states/state.js"></script>
+	<script src="src/states/gameplayState.js"></script>
+	<script src="src/states/pauseMenuState.js"></script>
+	<script src="src/gameManager.js"></script>
+
+	<script>
+		new GameManager().mainLoop();
+	</script>
+</body>
+</html>

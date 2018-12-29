@@ -1,0 +1,54 @@
+body {
+	font-family: Sans-serif;
+	margin: 0;
+}
+
+button {
+	width: 120px;
+	height: 40px;
+	display: block;
+	margin: auto auto 10px auto;
+	font-size: 16px;
+	background-color: Transparent;
+	border: 2px solid black;
+	cursor: pointer;
+}
+
+button:hover {
+	background-color: #b2b2b2;
+}
+
+#canvas {
+	position: absolute;
+	display: block;
+}
+
+#pauseMenu {
+	position: absolute;
+	width: 300px;
+	text-align: center;
+	border: solid;
+	top: 50%;
+	left: 50%;
+	transform: translate(-50%, -50%);
+	background-color: lightgrey;
+	display: none;
+}
+
+#debugMenu {
+	position: absolute;
+	left: 0;
+	top: 0;
+	color: white;
+	text-shadow:
+		-1px -1px 0 black,
+		1px -1px 0 black,
+		-1px 1px 0 black,
+		1px 1px 0 black;
+}
+
+#stats {
+	position: absolute;
+	top: 0px;
+	right: 0px;
+}
