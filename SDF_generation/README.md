@@ -1,24 +1,24 @@
 # Generating signed distance fields from TrueType fonts
 
 ## Sections
-### [Part 1 - Introduction and code setup](#part-1---introduction-and-code-setup)
+### [Part 1 - Introduction and code setup](#part-1---introduction-and-code-setup-1)
 1. [Introduction](#introduction)
 1. [The algorithm](#the-algorithm)
 1. [Creating a bitmap image](#creating-a-bitmap-image)
 
-### [Part 2 - Calculating the distance](#part-2---calculating-the-distance)
+### [Part 2 - Calculating the distance](#part-2---calculating-the-distance-1)
 1. [The minimum distance to a line](#the-minimum-distance-to-a-line)
 1. [The minimum distance to a quadratic Bézier](#the-minimum-distance-to-a-quadratic-bézier)
 1. [The cubic polynomial](#the-cubic-polynomial)
 1. [The roots of a cubic polynomial](#the-roots-of-a-cubic-polynomial)
 1. [The implementation](#the-implementation)
 
-### [Part 3 - Calculating the sign of the distance](#part-3---calculating-the-sign-of-the-distance)
+### [Part 3 - Calculating the sign of the distance](#part-3---calculating-the-sign-of-the-distance-1)
 1. [The algorithm](#the-algorithm-1)
 1. [The crossing number of a line](#the-crossing-number-of-a-line)
 1. [The crossing number of a quadratic Bézier](#the-crossing-number-of-a-quadratic-bézier)
 
-### [Part 4 - Generating the texture atlas](#part-4---generating-the-texture-atlas)
+### [Part 4 - Generating the texture atlas](#part-4---generating-the-texture-atlas-1)
 
 ### [References](#references)
 
