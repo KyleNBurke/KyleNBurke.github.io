@@ -1,0 +1,71 @@
+# Avoiding Internal Surface Collisions
+
+I'd like to discuss a technique for solving a common collision issue involving a hull sliding across a surface.
+
+![](images/internal_collision.gif)
+
+As you can see, the box is smoothly sliding across the surface until it abruptly stops, appearing to have hit something. In this article, I'll explain the issue and how I solved it. This problem can also happen in two dimensions, in this case, you would have a box sliding across a set of connected line segments.
+
+![](images/pic_1.png)
+
+For the solution discussed here, you need a collision detection algorithm that works using two convex collision hulls such as SAT or GJK.
+
+## The Problem
+
+Let's take a look at what is causing these undesired internal collisions. We'll examine and solve the problem in two deminsions, then extrapolate to three deminsions.
+
+Let's say the box slides across the surface to the right such that it's colliding with line segments B and C.
+
+![](images/pic_2.png)
+
+A naive way to handle these collisions is to resolve the collision between the box and the two line segments separately. Here's is the direction of the minimum resolution vector between the box and ling segment B.
+
+![](images/pic_3.png)
+
+This is what any collision detection algorithm will spit out, and it's exactly what we want. If we resolve the collision using this vector, the box will sit atop the line segment as desired.
+
+Now let's look at the direction of the minimum resolution vector for the other line segment.
+
+![](images/pic_4.png)
+
+Resolving the collision using this vector will result in the box appearing to have hit a wall. If the box is sliding along line segment B, once it hits C, a minimum resolution vector like this could be generated and resolving such collision will cause this internal collision issue.
+
+The same problem could happen if the box is moving left, then collides with line segment A.
+
+![](images/pic_5.png)
+
+## The Solution
+
+A solution I've found, is to handle the collisions holistically, in a single step. Let's look at the collision between the box and line segments A and B again. We want the space of possible collision normals to be the inclusive range between the normal of line segment A and the normal of line segment B:
+
+![](images/pic_6.png)
+
+We'd like to only generate collision normals in this range. If we can, then it won't be possible to get a normal that results in an internal collision. The way to accomplish this is simple, instead of feeding each line segment to our collision detection algorithm separately, feed the entire triangle to it at once. So now, we're checking for a collision between the box and a triangle made up of line segments A and B.
+
+![](images/pic_7.png)
+
+This will garuntee us a collision normal in the desired range.
+
+What about a collision with line segment C? Well if we're only trying to find the minimum resolution vector between the box and line segment B, there is only one possible normal we can generate on the right side of the line. It's the normal of line segment B, there is no range of possibilities here.
+
+![](images/pic_8.png)
+
+In this case, we can ensure our collision detection algorithm gives us this normal by simply extending line segment B. We extend it enough so that it is not possible to generate an internal normal. I roughly estimated the maximum length of one of these line segments, then doubled that to get the distance I extend the line.
+
+So, putting both scenarios together, the two red shapes below is what we feed to our algorithm when checking for a collision between the box and line segment B.
+
+![](images/pic_9.png)
+
+By generating a triangle like this, it's not possible to get an internal collision normal. As you can see, the generated hull is completely convex so we can easily feed it to common collision detection algorithms like SAT or GJK. There is no need to modify your chosen algorithm at all!
+
+Below are all the possible scenarios.
+
+![](images/pic_10.png)
+
+To recap, when checking for a collision between a hull and a line segment. We generate a collision hull and feed that, instead of the line, to our collision detection algorithm. The collision hull is formed using the rules below.
+
+1. If the line segment forms a convex angle with an adjacent line segment, the adjacent line is included.
+2. If the line segment forms a concave angle with an adjacent line segment, the line is extended.
+
+This will garuntee we the collision detection algorithm will never spit out an internal collision normal. One thing to note, is the generated collision hull will have a minimum of 2 vertices (concave-concave case) and a maximum of 4 (convex-convex case).
+
