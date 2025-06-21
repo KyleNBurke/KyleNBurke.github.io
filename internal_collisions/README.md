@@ -64,8 +64,38 @@ Below are all the possible scenarios.
 
 To recap, when checking for a collision between a hull and a line segment. We generate a collision hull and feed that, instead of the line, to our collision detection algorithm. The collision hull is formed using the rules below.
 
-1. If the line segment forms a convex angle with an adjacent line segment, the adjacent line is included.
+1. If the line segment forms a convex angle with an adjacent line segment, the adjacent line segment's isolated vertex is included.
 2. If the line segment forms a concave angle with an adjacent line segment, the line is extended.
 
 This will garuntee we the collision detection algorithm will never spit out an internal collision normal. One thing to note, is the generated collision hull will have a minimum of 2 vertices (concave-concave case) and a maximum of 4 (convex-convex case).
 
+## Moving to three deminsions
+
+Use the same basic principals, we can apply the solution in three dimensions too. Now, we'll consider a cube sliding across a collection of connected triangular faces.
+
+![](images/pic_11.png)
+
+If we take a closer look at collisions between the cube and a triangular face, we see the adjacent faces form convex and concave angles as before.
+
+![](images/pic_12.png)
+
+Here we see two adjacent faces that form concave angles and a single adjacent face that forms a convex angle.
+
+When checking for a collision between our cube and the highlighted face, we again generate a convex hull which is fed to the collision detection algorithm instead of the face. The collision hull is formed using the rules below.
+
+1. If the face forms a convex angle with an adjacent face, the adjacent face's isolated vertex is included.
+2. If the face forms a concave angle with an adjacent face, the face is extended.
+
+Using these rules, the highlighted face becomes the following hull of 5 vertices.
+
+![](images/pic_13.png)
+
+![](images/pic_14.png)
+
+Using this convex hull in our collision detection algorithm will garuntee we never get an undesired internal collision normal.
+
+Let's discuss exactly how we extend the triangular face when we have a concave angle. The normal of the adjacent face forming the convex angle must be preserved. If it's altered in any way, we could get collision normal that does not match the geometry of the adjacent faces.
+
+![](images/pic_15.png)
+
+In this example, we want to calculate B' and C' from the triangular face ABC. To do so, we simply extend vertex B along ray AB. Similarly, C' is calculated by extending vertex C along ray AC. If done this way, the normals of any adjacent faces, DBA in this case, will be preserved. The normal of DBA is the same as the normal of DB'A.
