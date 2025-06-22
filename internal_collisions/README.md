@@ -12,13 +12,13 @@ For the solution discussed here, you need a collision detection algorithm that w
 
 ## The Problem
 
-Let's take a look at what is causing these undesired internal collisions. We'll examine and solve the problem in two deminsions, then extrapolate to three deminsions.
+Let's take a look at what is causing these undesired internal collisions. We'll examine and solve the problem in two dimensions, then extrapolate to three dimensions.
 
 Let's say the box slides across the surface to the right such that it's colliding with line segments B and C.
 
 ![](images/pic_2.png)
 
-A naive way to handle these collisions is to resolve the collision between the box and the two line segments separately. Here's is the direction of the minimum resolution vector between the box and ling segment B.
+A naive way to handle these collisions is to resolve the collision between the box and the two line segments separately. Here's the direction of the minimum resolution vector between the box and ling segment B.
 
 ![](images/pic_3.png)
 
@@ -28,7 +28,7 @@ Now let's look at the direction of the minimum resolution vector for line segmen
 
 ![](images/pic_4.png)
 
-Resolving the collision using this vector will result in the box appearing to have hit a wall. If the box is sliding along line segment B, once it hits C, a minimum resolution vector like this could be generated and resolving such collision will cause this internal collision issue.
+Resolving the collision using this vector will result in the box appearing to have hit a wall. If the box is sliding along line segment B, once it hits C, a minimum resolution vector like this could be generated and resolving such collisions will cause this internal collision issue.
 
 The same problem could happen if the box is moving left, then collides with line segment A.
 
@@ -36,15 +36,15 @@ The same problem could happen if the box is moving left, then collides with line
 
 ## The Solution
 
-A solution I've found, is to handle the collisions holistically, in a single step. Let's look at the collision between the box and line segments A and B again. We want the space of possible collision normals to be the inclusive range between the normal of line segment A and the normal of line segment B:
+A solution I've found is to handle the collisions holistically, in a single step. Let's look at the collision between the box and line segments A and B again. We want the space of possible collision normals to be the inclusive range between the normal of line segment A and the normal of line segment B:
 
 ![](images/pic_6.png)
 
-We'd like to only generate collision normals in this range. If we can, then it won't be possible to get a normal that results in an internal collision. The way to accomplish this is simple, instead of feeding each line segment to our collision detection algorithm separately, feed the entire triangle to it at once. So now, we're checking for a collision between the box and a triangle made up of line segments A and B.
+We'd like to only generate collision normals in this range. If we can, then it won't be possible to get a normal that results in an internal collision. The way to accomplish this is simple: instead of feeding each line segment to our collision detection algorithm separately, feed the entire triangle to it at once. So now, we're checking for a collision between the box and a triangle made up of line segments A and B.
 
 ![](images/pic_7.png)
 
-This will garuntee us a collision normal in the desired range.
+This will guarantee us a collision normal in the desired range.
 
 What about a collision with line segment C? Well if we're only trying to find the minimum resolution vector between the box and line segment B, there is only one possible normal we can generate on the right side of the line. It's the normal of line segment B, there is no range of possibilities here.
 
@@ -67,11 +67,11 @@ To recap, when checking for a collision between a hull and a line segment. We ge
 1. If the line segment forms a convex angle with an adjacent line segment, the adjacent line segment's isolated vertex is included.
 2. If the line segment forms a concave angle with an adjacent line segment, the line is extended.
 
-This will garuntee our collision detection algorithm will never spit out an internal collision normal. One thing to note, the generated hull will have a minimum of 2 vertices (concave-concave case) and a maximum of 4 (convex-convex case).
+This will guarantee our collision detection algorithm will never spit out an internal collision normal. One thing to note, the generated hull will have a minimum of 2 vertices (concave-concave case) and a maximum of 4 (convex-convex case).
 
-## Moving to Three Deminsions
+## Moving to Three Dimensions
 
-Use the same basic principals, we can apply the solution in three dimensions too. Now, we'll consider a cube sliding across a collection of connected triangular faces.
+Using the same basic principles, we can apply the solution in three dimensions too. Now, we'll consider a cube sliding across a collection of connected triangular faces.
 
 ![](images/pic_11.png)
 
@@ -92,7 +92,7 @@ Using these rules, the highlighted face becomes the following hull of 5 vertices
 
 ![](images/pic_14.png)
 
-Using this convex hull in our collision detection algorithm we're garunteed to never get an undesired internal collision normal.
+Using this convex hull in our collision detection algorithm we're guaranteed to never get an undesired internal collision normal.
 
 Let's discuss exactly how we extend the triangular face when we have a concave angle. The normal of the adjacent face forming the convex angle must be preserved. If it's altered in any way, we could get a collision normal that does not match the geometry of the adjacent faces.
 
