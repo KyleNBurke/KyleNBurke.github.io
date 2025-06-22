@@ -92,10 +92,20 @@ Using these rules, the highlighted face becomes the following hull of 5 vertices
 
 ![](images/pic_14.png)
 
-Using this convex hull in our collision detection algorithm will garuntee we never get an undesired internal collision normal.
+Using this convex hull in our collision detection algorithm we're garunteed to never get an undesired internal collision normal.
 
 Let's discuss exactly how we extend the triangular face when we have a concave angle. The normal of the adjacent face forming the convex angle must be preserved. If it's altered in any way, we could get collision normal that does not match the geometry of the adjacent faces.
 
 ![](images/pic_15.png)
 
 In this example, we want to calculate B' and C' from the triangular face ABC. To do so, we simply extend vertex B along ray AB. Similarly, C' is calculated by extending vertex C along ray AC. If done this way, the normals of any adjacent faces, DBA in this case, will be preserved. The normal of DBA is the same as the normal of DB'A.
+
+Below is an example of a generated hull when all adjacent faces form concave angles. In this case, we have a hull of 6 vertices.
+
+![](images/pic_16.png)
+
+And here is an example when all adjacent faces form convex angles. In this case, our hull also has 6 vertices.
+
+![](images/pic_17.png)
+
+Again these generated hulls are completely convex so they can be used with common collision detection algorithms.
