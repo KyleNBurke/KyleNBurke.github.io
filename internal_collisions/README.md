@@ -8,7 +8,7 @@ As you can see, the box is smoothly sliding across the surface until it abruptly
 
 ![](images/pic_1.png)
 
-For the solution discussed here, you need a collision detection algorithm that works using two convex collision hulls such as SAT or GJK.
+For the solution discussed here, you need a collision detection algorithm that works using two convex collision hulls such as SAT or GJK. I have yet to come across this solution discussed online, so I thought I'd share it.
 
 ## The Problem
 
@@ -109,3 +109,9 @@ And here is an example when all adjacent faces form convex angles. In this case,
 ![](images/pic_17.png)
 
 Again these generated hulls are completely convex so they can be used with common collision detection algorithms.
+
+## Final Remarks
+
+And that's it. If you generate hulls in this way, you will not get any undesired internal collision normals.
+
+It's worth mentioning one more thing. If your set of connected line segments or triangular faces is static throughout the game, typically seen in world ground meshes, then you can precompute these hulls. There is no need to generate these hulls on the fly, per frame.
