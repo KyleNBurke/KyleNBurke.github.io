@@ -24,7 +24,7 @@ A naive way to handle these collisions is to resolve the collision between the b
 
 This is what any collision detection algorithm will spit out, and it's exactly what we want. If we resolve the collision using this vector, the box will sit atop the line segment as desired.
 
-Now let's look at the direction of the minimum resolution vector for the other line segment.
+Now let's look at the direction of the minimum resolution vector for line segment C.
 
 ![](images/pic_4.png)
 
@@ -52,11 +52,11 @@ What about a collision with line segment C? Well if we're only trying to find th
 
 In this case, we can ensure our collision detection algorithm gives us this normal by simply extending line segment B. We extend it enough so that it is not possible to generate an internal normal. I roughly estimated the maximum length of one of these line segments, then doubled that to get the distance I extend the line.
 
-So, putting both scenarios together, the two red shapes below is what we feed to our algorithm when checking for a collision between the box and line segment B.
+Putting both scenarios together, when checking for a collision between the box and line segment B, we feed the two red shapes below to our collision detection algorithm.
 
 ![](images/pic_9.png)
 
-By generating a triangle like this, it's not possible to get an internal collision normal. As you can see, the generated hull is completely convex so we can easily feed it to common collision detection algorithms like SAT or GJK. There is no need to modify your chosen algorithm at all!
+By using this triangle, instead of the line segment, it's not possible to get an internal collision normal. As you can see, the generated hull is completely convex so we can easily feed it to common collision detection algorithms like SAT or GJK. There is no need to modify your chosen algorithm at all!
 
 Below are all the possible scenarios.
 
@@ -67,9 +67,9 @@ To recap, when checking for a collision between a hull and a line segment. We ge
 1. If the line segment forms a convex angle with an adjacent line segment, the adjacent line segment's isolated vertex is included.
 2. If the line segment forms a concave angle with an adjacent line segment, the line is extended.
 
-This will garuntee we the collision detection algorithm will never spit out an internal collision normal. One thing to note, is the generated collision hull will have a minimum of 2 vertices (concave-concave case) and a maximum of 4 (convex-convex case).
+This will garuntee our collision detection algorithm will never spit out an internal collision normal. One thing to note, the generated hull will have a minimum of 2 vertices (concave-concave case) and a maximum of 4 (convex-convex case).
 
-## Moving to three deminsions
+## Moving to Three Deminsions
 
 Use the same basic principals, we can apply the solution in three dimensions too. Now, we'll consider a cube sliding across a collection of connected triangular faces.
 
@@ -94,7 +94,7 @@ Using these rules, the highlighted face becomes the following hull of 5 vertices
 
 Using this convex hull in our collision detection algorithm we're garunteed to never get an undesired internal collision normal.
 
-Let's discuss exactly how we extend the triangular face when we have a concave angle. The normal of the adjacent face forming the convex angle must be preserved. If it's altered in any way, we could get collision normal that does not match the geometry of the adjacent faces.
+Let's discuss exactly how we extend the triangular face when we have a concave angle. The normal of the adjacent face forming the convex angle must be preserved. If it's altered in any way, we could get a collision normal that does not match the geometry of the adjacent faces.
 
 ![](images/pic_15.png)
 
