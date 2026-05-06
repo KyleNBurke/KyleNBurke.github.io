@@ -1,0 +1,746 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>Generating Signed Distance Fields - Kyle Burke</title>
+    <link rel="stylesheet" href="../../style.css">
+</head>
+<body>
+    <header>
+        <h1 class="name_heading">Kyle Burke</h1>
+		<a href="../../index.html">Home</a>
+    </header>
+<h1 class="title">Generating Signed Distance Fields</h1>
+<p>Popularized by Valve, signed distance fields provide an efficient way to display text in games at an arbitrary resolution. In this four part series, I'll show how you can generate a texture atlas of signed distance fields from TrueType fonts as shown above.</p>
+<p>The technique in the <a href="https://steamcdn-a.akamaihd.net/apps/valve/2007/SIGGRAPH2007_AlphaTestedMagnification.pdf">original Valve paper</a> is to take a high resolution input bitmap, create a corresponding high resolution signed distance field, then downscale that to the desired final resolution. I'll show an alternative approach that uses only the desired resolution and produces exact distances in a reasonable amount of time. The trade off is the need to use a lot of math, including some calculus.</p>
+<p>While this series is tailored towards TrueType fonts, the algorithm can be used to generate signed distance fields from a vector defined shape given it's closed and made up of straight lines or quadratic Bézier curves. Rust will be my language of choice throughout the code examples and I won't be explaining what a signed distance field actually is and the related spread factor, that is not the focus of this series.</p>
+<p>Here's the breakdown: in part one, we'll look at the algorithm and setup the code for parts two and three which will call into a function for calculating the distance and a function for calculating the sign of that distance. The distance calculation is covered in part two and the calculation for sign of the distance is covered in part three. Part four will cover generating the texture atlas from the set of distance fields.</p>
+<h2>The algorithm</h2>
+<p>Let's start with the following pseudo code for generating our set of signed distance fields.</p>
+<pre><code>for each glyph g {
+	for each pixel center p in g's signed distance field {
+		let min_dist = +infinity
+		let total_cross_num = 0
+
+		for each curve c in g {
+			let dist = shortest distance from p to c
+			let cross_num = crossing number of c with respect to p
+
+			if dist < min_dist {
+				min_dist = dist
+			}
+
+			total_cross_num += cross_num
+		}
+
+		let signed_dist = if total_cross_num % 2 == 0 {
+			-min_dist
+		} else {
+			min_dist
+		}
+	}
+}
+</code></pre>
+<p>Calculating the distance and crossing number is done in constant time so looking at this psuedo code can give an idea of the algorithm's run time complexity. You can also see two things required to calculate the signed distance of a pixel, the unsigned distance and the crossing number. The unsigned distance is covered in part two and the crossing number is covered in part three. It's worth noting this algorithm lends well to parallel computing as calculating the signed distance of a pixel is independent of other pixels and glyphs.</p>
+<p>Let's take a look at the algorithm in more detail.</p>
+<pre><code><span style="color: rgb(106, 153, 85);">// Initialize freetype</span>
+<span style="color: rgb(197, 134, 192);">let</span> library = freetype::Library::<span style="color: rgb(220, 220, 170);">init</span>().<span style="color: rgb(220, 220, 170);">unwrap</span>();
+<span style="color: rgb(197, 134, 192);">let</span> face = library.<span style="color: rgb(220, 220, 170);">new_face</span>(font_file_path, <span style="color: rgb(181, 206, 168);">0</span>).<span style="color: rgb(220, 220, 170);">unwrap</span>();
+face.<span style="color: rgb(220, 220, 170);">set_pixel_sizes</span>(<span style="color: rgb(181, 206, 168);">0</span>, size).<span style="color: rgb(220, 220, 170);">unwrap</span>();
+
+<span style="color: rgb(197, 134, 192);">let</span> fields = <span style="color: rgb(78, 201, 176);">Vec</span>::<span style="color: rgb(220, 220, 170);">empty</span>();
+
+<span style="color: rgb(106, 153, 85);">// Iterate over characters</span>
+<span style="color: rgb(197, 134, 192);">for</span> char_code <span style="color: rgb(197, 134, 192);">in</span> <span style="color: rgb(181, 206, 168);">33</span>..<span style="color: rgb(181, 206, 168);">127</span> {
+	face.<span style="color: rgb(220, 220, 170);">load_char</span>(char_code, LoadFlag::<span style="color: rgb(220, 220, 170);">empty</span>()).<span style="color: rgb(220, 220, 170);">unwrap</span>();
+	<span style="color: rgb(197, 134, 192);">let</span> metrics = face.<span style="color: rgb(220, 220, 170);">glyph</span>().<span style="color: rgb(220, 220, 170);">metrics</span>();
+	<span style="color: rgb(197, 134, 192);">let</span> width = metrics.width <span style="color: rgb(197, 134, 192);">as</span> <span style="color: rgb(78, 201, 176);">usize</span> / <span style="color: rgb(181, 206, 168);">64</span> + spread * <span style="color: rgb(181, 206, 168);">2</span>;
+	<span style="color: rgb(197, 134, 192);">let</span> height = metrics.height <span style="color: rgb(197, 134, 192);">as</span> <span style="color: rgb(78, 201, 176);">usize</span> / <span style="color: rgb(181, 206, 168);">64</span> + spread * <span style="color: rgb(181, 206, 168);">2</span>;
+	<span style="color: rgb(197, 134, 192);">let</span> left_edge_padded = metrics.horiBearingX <span style="color: rgb(197, 134, 192);">as</span> <span style="color: rgb(78, 201, 176);">f64</span> / <span style="color: rgb(181, 206, 168);">64.0</span> - spread_f64;
+	<span style="color: rgb(197, 134, 192);">let</span> top_edge_padded = metrics.horiBearingY <span style="color: rgb(197, 134, 192);">as</span> <span style="color: rgb(78, 201, 176);">f64</span> / <span style="color: rgb(181, 206, 168);">64.0</span> + spread_f64;
+	<span style="color: rgb(197, 134, 192);">let</span> outline = face.<span style="color: rgb(220, 220, 170);">glyph</span>().<span style="color: rgb(220, 220, 170);">outline</span>().<span style="color: rgb(220, 220, 170);">unwrap</span>();
+
+	<span style="color: rgb(197, 134, 192);">let</span> <span style="color: rgb(197, 134, 192);">mut</span> field = <span style="color: rgb(78, 201, 176);">Vec</span>::<span style="color: rgb(220, 220, 170);">with_capacity</span>(height);
+
+	<span style="color: rgb(106, 153, 85);">// Iterate over texels in our distance field</span>
+	<span style="color: rgb(197, 134, 192);">for</span> row <span style="color: rgb(197, 134, 192);">in</span> <span style="color: rgb(181, 206, 168);">0</span>..height {
+		<span style="color: rgb(197, 134, 192);">let</span> <span style="color: rgb(197, 134, 192);">mut</span> field_row = <span style="color: rgb(78, 201, 176);">Vec</span>::<span style="color: rgb(220, 220, 170);">with_capacity</span>(width);
+
+		<span style="color: rgb(197, 134, 192);">for</span> col <span style="color: rgb(197, 134, 192);">in</span> <span style="color: rgb(181, 206, 168);">0</span>..width {
+			<span style="color: rgb(197, 134, 192);">let</span> <span style="color: rgb(197, 134, 192);">mut</span> min_dist = <span style="color: rgb(78, 201, 176);">f64</span>::MAX;
+			<span style="color: rgb(197, 134, 192);">let</span> <span style="color: rgb(197, 134, 192);">mut</span> total_cross_num = <span style="color: rgb(181, 206, 168);">0</span>;
+			<span style="color: rgb(197, 134, 192);">let</span> p = Vector {
+				x: left_edge_padded + col <span style="color: rgb(197, 134, 192);">as</span> <span style="color: rgb(78, 201, 176);">f64</span> + <span style="color: rgb(181, 206, 168);">0.5</span>,
+				y: top_edge_padded - row <span style="color: rgb(197, 134, 192);">as</span> <span style="color: rgb(78, 201, 176);">f64</span> - <span style="color: rgb(181, 206, 168);">0.5</span>
+			};
+
+			<span style="color: rgb(106, 153, 85);">// Find the minimum distance from p to each curve</span>
+			<span style="color: rgb(197, 134, 192);">for</span> contour <span style="color: rgb(197, 134, 192);">in</span> outline.<span style="color: rgb(220, 220, 170);">contours_iter</span>() {
+				<span style="color: rgb(197, 134, 192);">let</span> <span style="color: rgb(197, 134, 192);">mut</span> start = *contour.<span style="color: rgb(220, 220, 170);">start</span>();
+
+				<span style="color: rgb(197, 134, 192);">for</span> curve <span style="color: rgb(197, 134, 192);">in</span> contour {
+					<span style="color: rgb(197, 134, 192);">let</span> s = Vector {
+						x: start.x <span style="color: rgb(197, 134, 192);">as</span> <span style="color: rgb(78, 201, 176);">f64</span> / <span style="color: rgb(181, 206, 168);">64.0</span>,
+						y: start.y <span style="color: rgb(197, 134, 192);">as</span> <span style="color: rgb(78, 201, 176);">f64</span> / <span style="color: rgb(181, 206, 168);">64.0</span>
+					};
+
+					<span style="color: rgb(197, 134, 192);">let</span> (end, dist, cross_num) = <span style="color: rgb(197, 134, 192);">match</span> curve {
+						Curve::<span style="color: rgb(220, 220, 170);">Line</span>(end) =&gt; {
+							<span style="color: rgb(197, 134, 192);">let</span> e = Vector {
+								x: end.x <span style="color: rgb(197, 134, 192);">as</span> <span style="color: rgb(78, 201, 176);">f64</span> / <span style="color: rgb(181, 206, 168);">64.0</span>,
+								y: end.y <span style="color: rgb(197, 134, 192);">as</span> <span style="color: rgb(78, 201, 176);">f64</span> / <span style="color: rgb(181, 206, 168);">64.0</span>
+							};
+
+							<span style="color: rgb(197, 134, 192);">let</span> dist = <span style="color: rgb(220, 220, 170);">find_dist_to_line</span>(&p, &s, &e);
+							<span style="color: rgb(197, 134, 192);">let</span> cross_num = <span style="color: rgb(220, 220, 170);">find_cross_num_of_line</span>(&p, &s, &e);
+
+							(end, dist, cross_num)
+						},
+						Curve::<span style="color: rgb(220, 220, 170);">Bezier2</span>(control, end) =&gt; {
+							<span style="color: rgb(197, 134, 192);">let</span> c = Vector {
+								x: control.x <span style="color: rgb(197, 134, 192);">as</span> <span style="color: rgb(78, 201, 176);">f64</span> / <span style="color: rgb(181, 206, 168);">64.0</span>,
+								y: control.y <span style="color: rgb(197, 134, 192);">as</span> <span style="color: rgb(78, 201, 176);">f64</span> / <span style="color: rgb(181, 206, 168);">64.0</span>
+							};
+
+							<span style="color: rgb(197, 134, 192);">let</span> e = Vector {
+								x: end.x <span style="color: rgb(197, 134, 192);">as</span> <span style="color: rgb(78, 201, 176);">f64</span> / <span style="color: rgb(181, 206, 168);">64.0</span>,
+								y: end.y <span style="color: rgb(197, 134, 192);">as</span> <span style="color: rgb(78, 201, 176);">f64</span> / <span style="color: rgb(181, 206, 168);">64.0</span>
+							};
+
+							<span style="color: rgb(197, 134, 192);">let</span> dist = <span style="color: rgb(220, 220, 170);">find_dist_to_bezier</span>(&p, &s, &c, &e);
+							<span style="color: rgb(197, 134, 192);">let</span> cross_num = <span style="color: rgb(220, 220, 170);">find_cross_num_of_bezier</span>(&p, &s, &c, &e);
+
+							(end, dist, cross_num)
+						},
+						Curve::<span style="color: rgb(220, 220, 170);">Bezier3</span>(_, _, _) =&gt; {
+							panic!("cubic beziers not supported");
+						}
+					};
+
+					<span style="color: rgb(197, 134, 192);">if</span> dist &lt; min_dist {
+						min_dist = dist;
+					}
+
+					total_cross_num += cross_num;
+					start = end;
+				}
+			}
+
+			<span style="color: rgb(106, 153, 85);">// Clamp the signed distance to the spread and normalize it to a u8</span>
+			<span style="color: rgb(197, 134, 192);">let</span> dist_signed = <span style="color: rgb(197, 134, 192);">if</span> total_cross_num % <span style="color: rgb(181, 206, 168);">2</span> == <span style="color: rgb(181, 206, 168);">0</span> { -min_dist } <span style="color: rgb(197, 134, 192);">else</span> { min_dist };
+			<span style="color: rgb(197, 134, 192);">let</span> dist_clamped = dist_signed.<span style="color: rgb(220, 220, 170);">min</span>(spread_f64).<span style="color: rgb(220, 220, 170);">max</span>(-spread_f64);
+			<span style="color: rgb(197, 134, 192);">let</span> dist_positive = dist_clamped + spread_f64;
+			<span style="color: rgb(197, 134, 192);">let</span> dist_scaled = (dist_positive * <span style="color: rgb(181, 206, 168);">255.0</span> / (spread_f64 * <span style="color: rgb(181, 206, 168);">2.0</span>)).<span style="color: rgb(220, 220, 170);">round</span>() <span style="color: rgb(197, 134, 192);">as</span> <span style="color: rgb(78, 201, 176);">u8</span>;
+
+			field_row.<span style="color: rgb(220, 220, 170);">push</span>(dist_scaled);
+		}
+
+		field.<span style="color: rgb(220, 220, 170);">push</span>(field_row);
+	}
+
+	fields.<span style="color: rgb(220, 220, 170);">push</span>(field);
+}
+
+<span style="color: rgb(197, 134, 192);">let</span> atlas = <span style="color: rgb(220, 220, 170);">generate_atlas</span>(&fields);
+</code></pre>
+<p>First, we initialize FreeType, load in our TrueType font file and set the desired font size. Then, we iterate over the characters we'll generate signed distance fields for. I'm using the range of 33 to 127 (33 is inclusive but 127 is exclusive) which is all the <a href="http://facweb.cs.depaul.edu/sjost/it212/documents/ascii-pr.htm">printable ASCII characters</a>. When this outer loop is done, we'll have a set of signed distance fields, one for each character. Then, we generate a texture atlas from the set of signed distance fields.</p>
+<p>Inside the loop, we load the character and gather the required metrics. Note the metrics are defined in a 26.6 fixed float format, so we must divide by 64 to get the metrics in fractional units of pixels. FreeType will perform hinting when loading the glyph. One benefit of this is that the width and height will be multiples of 64 so we can cast them to an integer type and divide by 64 without losing accuracy. We want these to be whole integer values so they can define the glyph's signed distance field size in pixels. Also, note the adjustment needed to account for the spread of the signed distance field.</p>
+<p>Next, we can iterate over all the pixels in the field to calculate a signed distance for each one. Given a pixel, it's distance can be found by calculating the shortest distance from the center of the pixel to each curve of the glyph. Once we have the shortest distance to each curve, the minimum out of those distances is the final distance. In more detail, we calculate the center of the pixel p then iterate over all the contours of the glyph. A contour in this context just makes up a closed shape. Consider the character "o", it has two contours, one for the inner loop and one for the outer loop. Within a contour, we iterate over the curves that make it up, which can either be a straight line or a quadratic Bézier. Note, for a line we only have it's end point and for the Bézier we have it's control and end point. Because the contour is closed, the end of one curve is always the start of the next. To get the start of the first curve, we use .start() of the contour. At this point, for each pixel center p, we're able to iterate over each curve in the glyph and know the curve's start, end and if a Bézier, control point. From here we calculate two things, the shortest distance from p to the curve and the crossing number. These two things give us the signed distance of p.</p>
+<p>After calculating the signed distance, we clamp it to the spread making its floating point range [-spread, spread]. The next calculations modify the distance so its range is integer values of [0, 255], the size of a byte.</p>
+<h2>Creating a bitmap image</h2>
+<pre><code><span style="color: rgb(197, 134, 192);">fn</span> <span style="color: rgb(220, 220, 170);">save_to_bitmap</span>(file_path: &<span style="color: rgb(78, 201, 176);">str</span>, atlas: &<span style="color: rgb(78, 201, 176);">Vec</span>&lt;<span style="color: rgb(78, 201, 176);">Vec</span>&lt;<span style="color: rgb(78, 201, 176);">u8</span>&gt;&gt;) {
+	<span style="color: rgb(197, 134, 192);">let</span> image_width = atlas[<span style="color: rgb(181, 206, 168);">0</span>].<span style="color: rgb(220, 220, 170);">len</span>();
+	<span style="color: rgb(197, 134, 192);">let</span> image_height = atlas.<span style="color: rgb(220, 220, 170);">len</span>();
+	<span style="color: rgb(197, 134, 192);">let</span> image_row_padding_len = (<span style="color: rgb(181, 206, 168);">4</span> - image_width % <span style="color: rgb(181, 206, 168);">4</span>) % <span style="color: rgb(181, 206, 168);">4</span>;
+
+	<span style="color: rgb(197, 134, 192);">let</span> <span style="color: rgb(197, 134, 192);">mut</span> buffer: <span style="color: rgb(78, 201, 176);">Vec</span>&lt;<span style="color: rgb(78, 201, 176);">u8</span>&gt; = <span style="color: rgb(78, 201, 176);">Vec</span>::<span style="color: rgb(220, 220, 170);">with_capacity</span>(<span style="color: rgb(181, 206, 168);">1078</span> + (image_width + image_row_padding_len) * image_height);
+
+	<span style="color: rgb(106, 153, 85);">// Header</span>
+	buffer.<span style="color: rgb(220, 220, 170);">push</span>(<span style="color: rgb(181, 206, 168);">66</span><span style="color: rgb(78, 201, 176);">u8</span>);
+	buffer.<span style="color: rgb(220, 220, 170);">push</span>(<span style="color: rgb(181, 206, 168);">77</span><span style="color: rgb(78, 201, 176);">u8</span>);
+
+	<span style="color: rgb(197, 134, 192);">let</span> file_size = <span style="color: rgb(181, 206, 168);">0</span><span style="color: rgb(78, 201, 176);">u32</span>.<span style="color: rgb(220, 220, 170);">to_le_bytes</span>();
+	buffer.<span style="color: rgb(220, 220, 170);">extend_from_slice</span>(&file_size);
+
+	<span style="color: rgb(197, 134, 192);">let</span> reserved = <span style="color: rgb(181, 206, 168);">0</span><span style="color: rgb(78, 201, 176);">u16</span>.<span style="color: rgb(220, 220, 170);">to_le_bytes</span>();
+	buffer.<span style="color: rgb(220, 220, 170);">extend_from_slice</span>(&reserved);
+	buffer.<span style="color: rgb(220, 220, 170);">extend_from_slice</span>(&reserved);
+
+	<span style="color: rgb(197, 134, 192);">let</span> pixel_data_offset = <span style="color: rgb(181, 206, 168);">0</span><span style="color: rgb(78, 201, 176);">u32</span>.<span style="color: rgb(220, 220, 170);">to_le_bytes</span>();
+	buffer.<span style="color: rgb(220, 220, 170);">extend_from_slice</span>(&pixel_data_offset);
+
+	<span style="color: rgb(106, 153, 85);">// Info header</span>
+	<span style="color: rgb(197, 134, 192);">let</span> header_size = <span style="color: rgb(181, 206, 168);">40</span><span style="color: rgb(78, 201, 176);">u32</span>.<span style="color: rgb(220, 220, 170);">to_le_bytes</span>();
+	buffer.<span style="color: rgb(220, 220, 170);">extend_from_slice</span>(&header_size);
+
+	<span style="color: rgb(197, 134, 192);">let</span> image_width_i32 = (image_width <span style="color: rgb(197, 134, 192);">as</span> <span style="color: rgb(78, 201, 176);">i32</span>).<span style="color: rgb(220, 220, 170);">to_le_bytes</span>();
+	buffer.<span style="color: rgb(220, 220, 170);">extend_from_slice</span>(&image_width_i32);
+
+	<span style="color: rgb(197, 134, 192);">let</span> image_height_i32 = (image_height <span style="color: rgb(197, 134, 192);">as</span> <span style="color: rgb(78, 201, 176);">i32</span>).<span style="color: rgb(220, 220, 170);">to_le_bytes</span>();
+	buffer.<span style="color: rgb(220, 220, 170);">extend_from_slice</span>(&image_height_i32);
+
+	<span style="color: rgb(197, 134, 192);">let</span> planes = <span style="color: rgb(181, 206, 168);">1</span><span style="color: rgb(78, 201, 176);">u16</span>.<span style="color: rgb(220, 220, 170);">to_le_bytes</span>();
+	buffer.<span style="color: rgb(220, 220, 170);">extend_from_slice</span>(&planes);
+
+	<span style="color: rgb(197, 134, 192);">let</span> bpp = <span style="color: rgb(181, 206, 168);">8</span><span style="color: rgb(78, 201, 176);">u16</span>.<span style="color: rgb(220, 220, 170);">to_le_bytes</span>();
+	buffer.<span style="color: rgb(220, 220, 170);">extend_from_slice</span>(&bpp);
+
+	<span style="color: rgb(197, 134, 192);">let</span> compression_type = <span style="color: rgb(181, 206, 168);">0</span><span style="color: rgb(78, 201, 176);">u32</span>.<span style="color: rgb(220, 220, 170);">to_le_bytes</span>();
+	buffer.<span style="color: rgb(220, 220, 170);">extend_from_slice</span>(&compression_type);
+
+	<span style="color: rgb(197, 134, 192);">let</span> compressed_image_size = <span style="color: rgb(181, 206, 168);">0</span><span style="color: rgb(78, 201, 176);">u32</span>.<span style="color: rgb(220, 220, 170);">to_le_bytes</span>();
+	buffer.<span style="color: rgb(220, 220, 170);">extend_from_slice</span>(&compressed_image_size);
+
+	<span style="color: rgb(197, 134, 192);">let</span> x_pixels_per_meter = <span style="color: rgb(181, 206, 168);">0</span><span style="color: rgb(78, 201, 176);">i32</span>.<span style="color: rgb(220, 220, 170);">to_le_bytes</span>();
+	buffer.<span style="color: rgb(220, 220, 170);">extend_from_slice</span>(&x_pixels_per_meter);
+
+	<span style="color: rgb(197, 134, 192);">let</span> y_pixels_per_meter = <span style="color: rgb(181, 206, 168);">0</span><span style="color: rgb(78, 201, 176);">i32</span>.<span style="color: rgb(220, 220, 170);">to_le_bytes</span>();
+	buffer.<span style="color: rgb(220, 220, 170);">extend_from_slice</span>(&y_pixels_per_meter);
+
+	<span style="color: rgb(197, 134, 192);">let</span> total_colors = <span style="color: rgb(181, 206, 168);">0</span><span style="color: rgb(78, 201, 176);">u32</span>.<span style="color: rgb(220, 220, 170);">to_le_bytes</span>();
+	buffer.<span style="color: rgb(220, 220, 170);">extend_from_slice</span>(&total_colors);
+
+	<span style="color: rgb(197, 134, 192);">let</span> important_colors = <span style="color: rgb(181, 206, 168);">0</span><span style="color: rgb(78, 201, 176);">u32</span>.<span style="color: rgb(220, 220, 170);">to_le_bytes</span>();
+	buffer.<span style="color: rgb(220, 220, 170);">extend_from_slice</span>(&important_colors);
+
+	<span style="color: rgb(106, 153, 85);">// Color table</span>
+	<span style="color: rgb(197, 134, 192);">for</span> i <span style="color: rgb(197, 134, 192);">in</span> <span style="color: rgb(181, 206, 168);">0</span>..<span style="color: rgb(181, 206, 168);">256</span> {
+		<span style="color: rgb(197, 134, 192);">let</span> i_u8 = i <span style="color: rgb(197, 134, 192);">as</span> <span style="color: rgb(78, 201, 176);">u8</span>;
+		buffer.<span style="color: rgb(220, 220, 170);">push</span>(i_u8);
+		buffer.<span style="color: rgb(220, 220, 170);">push</span>(i_u8);
+		buffer.<span style="color: rgb(220, 220, 170);">push</span>(i_u8);
+		buffer.<span style="color: rgb(220, 220, 170);">push</span>(<span style="color: rgb(181, 206, 168);">0</span><span style="color: rgb(78, 201, 176);">u8</span>);
+	}
+
+	<span style="color: rgb(106, 153, 85);">// Pixel data offset in header</span>
+	<span style="color: rgb(197, 134, 192);">let</span> pixel_data_offset = (buffer.<span style="color: rgb(220, 220, 170);">len</span>() <span style="color: rgb(197, 134, 192);">as</span> <span style="color: rgb(78, 201, 176);">u32</span>).<span style="color: rgb(220, 220, 170);">to_le_bytes</span>();
+	<span style="color: rgb(197, 134, 192);">for</span> i <span style="color: rgb(197, 134, 192);">in</span> <span style="color: rgb(181, 206, 168);">0</span>..<span style="color: rgb(181, 206, 168);">4</span> { buffer[<span style="color: rgb(181, 206, 168);">10</span> + i] = pixel_data_offset[i] };
+
+	<span style="color: rgb(106, 153, 85);">// Pixel data</span>
+	<span style="color: rgb(197, 134, 192);">let</span> padding = vec![<span style="color: rgb(181, 206, 168);">0</span><span style="color: rgb(78, 201, 176);">u8</span>; image_row_padding_len];
+	<span style="color: rgb(197, 134, 192);">for</span> row <span style="color: rgb(197, 134, 192);">in</span> atlas.<span style="color: rgb(220, 220, 170);">iter</span>().<span style="color: rgb(220, 220, 170);">rev</span>() {
+		<span style="color: rgb(197, 134, 192);">for</span> texel <span style="color: rgb(197, 134, 192);">in</span> row {
+			buffer.<span style="color: rgb(220, 220, 170);">push</span>(*texel);
+		}
+
+		buffer.<span style="color: rgb(220, 220, 170);">extend_from_slice</span>(&padding);
+	}
+
+	<span style="color: rgb(106, 153, 85);">// File size in header</span>
+	<span style="color: rgb(197, 134, 192);">let</span> file_size = (buffer.<span style="color: rgb(220, 220, 170);">len</span>() <span style="color: rgb(197, 134, 192);">as</span> <span style="color: rgb(78, 201, 176);">u32</span>).<span style="color: rgb(220, 220, 170);">to_le_bytes</span>();
+	<span style="color: rgb(197, 134, 192);">for</span> i <span style="color: rgb(197, 134, 192);">in</span> <span style="color: rgb(181, 206, 168);">0</span>..<span style="color: rgb(181, 206, 168);">4</span> { buffer[<span style="color: rgb(181, 206, 168);">2</span> + i] = file_size[i] };
+
+	<span style="color: rgb(197, 134, 192);">let</span> <span style="color: rgb(197, 134, 192);">mut</span> file = File::<span style="color: rgb(220, 220, 170);">create</span>(file_path).<span style="color: rgb(220, 220, 170);">unwrap</span>();
+	file.<span style="color: rgb(220, 220, 170);">write_all</span>(&buffer).<span style="color: rgb(220, 220, 170);">unwrap</span>();
+}
+</code></pre>
+<h1>Calculating the distance</h1>
+<p>In part one, we setup our code which will call two functions to calculate the distance from point <code class="inline_code">p</code> to a curve, <code class="inline_code">find_dist_to_line()</code> and <code class="inline_code">find_dist_to_bezier()</code>. <code class="inline_code">p</code> is the center of a pixel in the signed distance field of a glyph and a curve can either be a straight line (defined by its start and end points) or a quadratic bézier (defined by it's start, control and end points). These two functions are the focus of this part.</p>
+<h2>The minimum distance to a line</h2>
+<p>Given a point <code class="inline_code">p</code> and a line segment <code class="inline_code">se</code>, the shortest distance between the two is relatively straight forward to calculate.</p>
+<pre><code><span style="color: rgb(197, 134, 192);">fn</span> <span style="color: rgb(220, 220, 170);">find_dist_to_line</span>(p: &Vector, s: &Vector, e: &Vector) -&gt; <span style="color: rgb(78, 201, 176);">f64</span> {
+	<span style="color: rgb(106, 153, 85);">// Find the distance along the line the projected point lies</span>
+	<span style="color: rgb(197, 134, 192);">let</span> diff = Vector { x: e.x - s.x, y: e.y - s.y };
+	<span style="color: rgb(197, 134, 192);">let</span> dot = (p.x - s.x) * diff.x + (p.y - s.y) * diff.y;
+	<span style="color: rgb(197, 134, 192);">let</span> t = dot / (diff.x * diff.x + diff.y * diff.y);
+
+	<span style="color: rgb(106, 153, 85);">// Project the point onto the line segment</span>
+	<span style="color: rgb(197, 134, 192);">let</span> t = t.<span style="color: rgb(220, 220, 170);">max</span>(<span style="color: rgb(181, 206, 168);">0.0</span>).<span style="color: rgb(220, 220, 170);">min</span>(<span style="color: rgb(181, 206, 168);">1.0</span>);
+	<span style="color: rgb(197, 134, 192);">let</span> proj = Vector { x: s.x + t * diff.x, y: s.y + t * diff.y };
+
+	<span style="color: rgb(106, 153, 85);">// Find the distance</span>
+	<span style="color: rgb(197, 134, 192);">let</span> proj_diff = Vector { x: proj.x - p.x, y: proj.y - p.y };
+	(proj_diff.x * proj_diff.x + proj_diff.y * proj_diff.y).<span style="color: rgb(220, 220, 170);">sqrt</span>()
+}
+</code></pre>
+<p>This function is projecting <code class="inline_code">p</code> onto the line segment in the direction of it's normal. Then the length of the segment between <code class="inline_code">p</code> and its projected counter part is the resulting distance.</p>
+<img src="min_dist_to_line.png" alt="" /><p>The minimum distance from <code class="inline_code">p</code> to the line segment is the length of the segment defined by <code class="inline_code">p</code> and <code class="inline_code">p proj</code>. Note, by clamping <code class="inline_code">t</code> between 0 and 1, the projected point is clamped between <code class="inline_code">s</code> and <code class="inline_code">e</code> so it cannot lie off the line segment.</p>
+<h2>The minimum distance to a quadratic Bézier</h2>
+<p>The shortest distance between a point and a quadratic Bézier is much harder to find, we'll need to use a lot of math to calculate this in constant time.</p>
+<h3>The cubic polynomial</h3>
+<p>Curtesy of Nouri Ahmad Suleiman, in their paper titled <a href="https://www.primescholars.com/articles/an-algorithm-for-computing-the-shortest-distance-between-a-point-and-quadratic-bezier-curve-92626.html">"An Algorithm for Computing the Shortest Distance between a Point and Quadratic Bezier Curve"</a>, they found that "the problem of determining the shortest distance between a point and quadratic Bezier curve is reduced to a problem of finding the roots of a third degree polynomial". Let's see why this is the case.</p>
+<p>The formula for a quadratic Bézier curve is</p>
+<math class="math_block">
+<mi>B</mi><mi>(</mi><mi>t</mi><mi>)</mi><mo>=</mo><mi>(</mi><mn>1</mn><mo>&minus;</mo><mi>t</mi><msup><mi>)</mi><mn>2</mn></msup><msub><mi>P</mi><mn>0</mn></msub><mo>+</mo><mn>2</mn><mi>t</mi><mi>(</mi><mn>1</mn><mo>&minus;</mo><mi>t</mi><mi>)</mi><msub><mi>P</mi><mn>1</mn></msub><mo>+</mo><msup><mi>t</mi><mn>2</mn></msup><msub><mi>P</mi><mn>2</mn></msub></math><p>where <math>
+<mi>t</mi><mo>&isin;</mo><mi>[</mi><mn>0</mn><ms>,&nbsp;</ms><mn>1</mn><mi>]</mi></math> and <math>
+<msub><mi>P</mi><mn>0</mn></msub><mi>(</mi><msub><mi>x</mi><mn>0</mn></msub><ms>,&nbsp;</ms><msub><mi>y</mi><mn>0</mn></msub><mi>)</mi><ms>,&nbsp;</ms><msub><mi>P</mi><mn>1</mn></msub><mi>(</mi><msub><mi>x</mi><mn>1</mn></msub><ms>,&nbsp;</ms><msub><mi>y</mi><mn>1</mn></msub><mi>)</mi></math> and <math>
+<msub><mi>P</mi><mn>2</mn></msub><mi>(</mi><msub><mi>x</mi><mn>2</mn></msub><ms>,&nbsp;</ms><msub><mi>y</mi><mn>2</mn></msub><mi>)</mi></math> are the control points.</p>
+<p>Given <math>
+<mi>t</mi></math>, <math>
+<mi>B</mi><mi>(</mi><mi>t</mi><mi>)</mi></math> will result in a point along the curve. Similar to the line segment, when</p>
+<ul><li><math>
+<mi>t</mi><mo>=</mo><mn>0</mn><ms>,&nbsp;</ms><mi>B</mi><mi>(</mi><mi>t</mi><mi>)</mi><mo>=</mo><msub><mi>P</mi><mn>0</mn></msub></math></li><li> <math>
+<mi>t</mi><mo>=</mo><mn>0.5</mn><ms>,&nbsp;</ms><mi>B</mi><mi>(</mi><mi>t</mi><mi>)</mi><mo>=</mo><msub><mi>P</mi><mn>1</mn></msub></math></li><li> <math>
+<mi>t</mi><mo>=</mo><mn>1</mn><ms>,&nbsp;</ms><mi>B</mi><mi>(</mi><mi>t</mi><mi>)</mi><mo>=</mo><msub><mi>P</mi><mn>2</mn></msub></math></li></ul><p>Let's now define a new function given our point <math>
+<mi>p</mi></math>.</p>
+<math class="math_block">
+<mi>f</mi><mi>(</mi><mi>t</mi><mi>)</mi><mo>=</mo><mi>|</mi><mi>B</mi><mi>(</mi><mi>t</mi><mi>)</mi><mo>&minus;</mo><mi>p</mi><msup><mi>|</mi><mn>2</mn></msup></math><p>Because <math>
+<mi>B</mi><mi>(</mi><mi>t</mi><mi>)</mi></math> and <math>
+<mi>p</mi></math> are points, <math>
+<mi>B</mi><mi>(</mi><mi>t</mi><mi>)</mi><mo>&minus;</mo><mi>p</mi></math> is a vector and <math>
+<mi>f</mi><mi>(</mi><mi>t</mi><mi>)</mi></math> is the magnitude squared of that vector. Put another way, given <math>
+<mi>t</mi></math>, <math>
+<mi>f</mi><mi>(</mi><mi>t</mi><mi>)</mi></math> is the distance squared between point <math>
+<mi>p</mi></math> and point <math>
+<mi>B</mi><mi>(</mi><mi>t</mi><mi>)</mi></math>. Therefore, to find the shortest distance between <math>
+<mi>p</mi></math> and the curve, we must find <math>
+<mi>t</mi><mo>&prime;</mo><mo>&isin;</mo><mi>[</mi><mn>0</mn><ms>,&nbsp;</ms><mn>1</mn><mi>]</mi></math>, where <math>
+<mi>f</mi><mi>(</mi><mi>t</mi><mo>&prime;</mo><mi>)</mi></math> is the global minimum in the range.</p>
+<p>How do we find <math>
+<mi>t</mi><mo>&prime;</mo></math>? Well let's take another look at <math>
+<mi>f</mi><mi>(</mi><mi>t</mi><mi>)</mi></math>, if we express it in terms of <math>
+<msub><mi>x</mi><mn>0</mn></msub><ms>,&nbsp;</ms><msub><mi>y</mi><mn>0</mn></msub><ms>,&nbsp;</ms><msub><mi>x</mi><mn>1</mn></msub><ms>,&nbsp;</ms><msub><mi>y</mi><mn>1</mn></msub><ms>,&nbsp;</ms><msub><mi>x</mi><mn>2</mn></msub><ms>,&nbsp;</ms><msub><mi>y</mi><mn>2</mn></msub></math> and the point <math>
+<mi>p</mi></math> at <math>
+<mi>(</mi><msub><mi>x</mi><mi>p</mi></msub><ms>,&nbsp;</ms><msub><mi>y</mi><mi>p</mi></msub><mi>)</mi></math> we have the following fourth degree polynomial.</p>
+<math class="math_block">
+<mi>f</mi><mi>(</mi><mi>t</mi><mi>)</mi><mo>=</mo><msub><mi>d</mi><mn>4</mn></msub><msup><mi>t</mi><mn>4</mn></msup><mo>+</mo><mn>4</mn><msub><mi>d</mi><mn>3</mn></msub><msup><mi>t</mi><mn>3</mn></msup><mo>+</mo><mn>2</mn><msub><mi>d</mi><mn>2</mn></msub><msup><mi>t</mi><mn>2</mn></msup><mo>+</mo><mn>4</mn><msub><mi>d</mi><mn>1</mn></msub><mi>t</mi><mo>+</mo><msub><mi>d</mi><mn>0</mn></msub></math><p>where,</p>
+<math class="math_block">
+<mtable>
+<mtr><mtd class="math_td_left"><msub><mi>d</mi><mn>4</mn></msub></mtd><mtd class="math_td_right"><mo>=</mo><mi>(</mi><msub><mi>x</mi><mn>0</mn></msub><mo>&minus;</mo><mn>2</mn><msub><mi>x</mi><mn>1</mn></msub><mo>+</mo><msub><mi>x</mi><mn>2</mn></msub><msup><mi>)</mi><mn>2</mn></msup><mo>+</mo><mi>(</mi><msub><mi>y</mi><mn>0</mn></msub><mo>&minus;</mo><mn>2</mn><msub><mi>y</mi><mn>1</mn></msub><mo>+</mo><msub><mi>y</mi><mn>2</mn></msub><msup><mi>)</mi><mn>2</mn></msup></mtd></mtr>
+<mtr><mtd class="math_td_left"><msub><mi>d</mi><mn>3</mn></msub></mtd><mtd class="math_td_right"><mo>=</mo><mi>(</mi><msub><mi>x</mi><mn>0</mn></msub><mo>&minus;</mo><mn>2</mn><msub><mi>x</mi><mn>1</mn></msub><mo>+</mo><msub><mi>x</mi><mn>2</mn></msub><mi>)</mi><mi>(</mi><msub><mi>x</mi><mn>1</mn></msub><mo>&minus;</mo><msub><mi>x</mi><mn>0</mn></msub><mi>)</mi><mo>+</mo><mi>(</mi><msub><mi>y</mi><mn>0</mn></msub><mo>&minus;</mo><mn>2</mn><msub><mi>y</mi><mn>1</mn></msub><mo>+</mo><msub><mi>y</mi><mn>2</mn></msub><mi>)</mi><mi>(</mi><msub><mi>y</mi><mn>1</mn></msub><mo>&minus;</mo><msub><mi>y</mi><mn>0</mn></msub><mi>)</mi></mtd></mtr>
+<mtr><mtd class="math_td_left"><msub><mi>d</mi><mn>2</mn></msub></mtd><mtd class="math_td_right"><mo>=</mo><mi>(</mi><msub><mi>x</mi><mn>0</mn></msub><mo>&minus;</mo><mn>2</mn><msub><mi>x</mi><mn>1</mn></msub><mo>+</mo><msub><mi>x</mi><mn>2</mn></msub><mi>)</mi><mi>(</mi><msub><mi>x</mi><mn>0</mn></msub><mo>&minus;</mo><msub><mi>x</mi><mi>p</mi></msub><mi>)</mi><mo>+</mo><mi>(</mi><msub><mi>y</mi><mn>0</mn></msub><mo>&minus;</mo><mn>2</mn><msub><mi>y</mi><mn>1</mn></msub><mo>+</mo><msub><mi>y</mi><mn>2</mn></msub><mi>)</mi><mi>(</mi><msub><mi>y</mi><mn>0</mn></msub><mo>&minus;</mo><msub><mi>y</mi><mi>p</mi></msub><mi>)</mi><mo>+</mo><mn>2</mn><mi>(</mi><msub><mi>x</mi><mn>1</mn></msub><mo>&minus;</mo><msub><mi>x</mi><mn>0</mn></msub><msup><mi>)</mi><mn>2</mn></msup><mo>+</mo><mn>2</mn><mi>(</mi><msub><mi>y</mi><mn>1</mn></msub><mo>&minus;</mo><msub><mi>y</mi><mn>0</mn></msub><msup><mi>)</mi><mn>2</mn></msup></mtd></mtr>
+<mtr><mtd class="math_td_left"><msub><mi>d</mi><mn>1</mn></msub></mtd><mtd class="math_td_right"><mo>=</mo><mi>(</mi><msub><mi>x</mi><mn>1</mn></msub><mo>&minus;</mo><msub><mi>x</mi><mn>0</mn></msub><mi>)</mi><mi>(</mi><msub><mi>x</mi><mn>0</mn></msub><mo>&minus;</mo><msub><mi>x</mi><mi>p</mi></msub><mi>)</mi><mo>+</mo><mi>(</mi><msub><mi>y</mi><mn>1</mn></msub><mo>&minus;</mo><msub><mi>y</mi><mn>0</mn></msub><mi>)</mi><mi>(</mi><msub><mi>y</mi><mn>0</mn></msub><mo>&minus;</mo><msub><mi>y</mi><mi>p</mi></msub><mi>)</mi></mtd></mtr>
+<mtr><mtd class="math_td_left"><msub><mi>d</mi><mn>0</mn></msub></mtd><mtd class="math_td_right"><mo>=</mo><mi>(</mi><msub><mi>x</mi><mn>0</mn></msub><mo>&minus;</mo><msub><mi>x</mi><mi>p</mi></msub><msup><mi>)</mi><mn>2</mn></msup><mo>+</mo><mi>(</mi><msub><mi>y</mi><mn>0</mn></msub><mo>&minus;</mo><msub><mi>y</mi><mi>p</mi></msub><msup><mi>)</mi><mn>2</mn></msup></mtd></mtr>
+</mtable>
+</math><p>Recall from calculus, the global minimum of <math>
+<mi>f</mi><mi>(</mi><mi>t</mi><mi>)</mi></math> will have a slope of 0. We'll need to find the roots of its derivative or, the solution to the equation, <math>
+<mi>f</mi><mo>&prime;</mo><mi>(</mi><mi>t</mi><mi>)</mi><mo>=</mo><mn>0</mn></math>. The root that results in the smallest <math>
+<mi>f</mi><mi>(</mi><mi>t</mi><mi>)</mi></math> is the global minimum.</p>
+<p>Differentiating <math>
+<mi>f</mi><mi>(</mi><mi>t</mi><mi>)</mi></math> gives</p>
+<math class="math_block">
+<mi>f</mi><mo>&prime;</mo><mi>(</mi><mi>t</mi><mi>)</mi><mo>=</mo><mn>4</mn><mi>P</mi><mi>(</mi><mi>t</mi><mi>)</mi></math><p>where</p>
+<math class="math_block">
+<mi>P</mi><mi>(</mi><mi>t</mi><mi>)</mi><mo>=</mo><msub><mi>d</mi><mn>4</mn></msub><msup><mi>t</mi><mn>3</mn></msup><mo>+</mo><mn>3</mn><msub><mi>d</mi><mn>3</mn></msub><msup><mi>t</mi><mn>2</mn></msup><mo>+</mo><msub><mi>d</mi><mn>2</mn></msub><mi>t</mi><mo>+</mo><msub><mi>d</mi><mn>1</mn></msub></math><p>which is a third degree polynomial. And there you have it, the problem of finding the shortest distance between a point and a quadratic Bézier is reduced to a problem of finding the roots of a cubic polynomial.</p>
+<p>There's one issue we'll need to be careful of. <math>
+<mi>f</mi><mo>&prime;</mo><mi>(</mi><mi>t</mi><mi>)</mi><mo>=</mo><mn>0</mn></math> can give roots that lie outside the interval <math>
+<mi>[</mi><mn>0</mn><ms>,&nbsp;</ms><mn>1</mn><mi>]</mi></math>, so those should be clamped.</p>
+<h2>The roots of a cubic polynomial</h2>
+<img src="cubic_polynomial.png" alt="a cubic polynomial" /><p>Finding the roots of a cubic polynomial is not trivial. We want to solve the cubic equation which has the form</p>
+<math class="math_block">
+<mi>a</mi><msup><mi>x</mi><mn>3</mn></msup><mo>+</mo><mi>b</mi><msup><mi>x</mi><mn>2</mn></msup><mo>+</mo><mi>c</mi><mi>x</mi><mo>+</mo><mi>d</mi><mo>=</mo><mn>0</mn></math><p>where <math>
+<mi>a</mi><mo>&ne;</mo><mn>0</mn></math>.</p>
+<p>This topic is explained extremely well by this video on Mathologer's YouTube channel.</p>
+<a href="https://www.youtube.com/watch?v=N-KXStupwsc" target="_blank"><img src="https://img.youtube.com/vi/N-KXStupwsc/0.jpg" alt=""></a><p>I also found the <a href="https://en.wikipedia.org/wiki/Cubic_equation">Wikipedia article on the cubic equation</a> very helpful and well written. I'll show only the pertinent information from these sources so if you wish for more detail or proofs on the following formulas I recommend checking them out.</p>
+<p>We'll start by first obtaining what's know as the depressed cubic from the original cubic.</p>
+<math class="math_block">
+<msup><mi>t</mi><mn>3</mn></msup><mo>+</mo><mi>p</mi><mi>t</mi><mo>+</mo><mi>q</mi></math><p>where</p>
+<math class="math_block">
+<mi>t</mi><mo>=</mo><mi>x</mi><mo>+</mo><mfrac><mrow><mi>b</mi></mrow><mrow><mn>3</mn><mi>a</mi></mrow></mfrac></math><math class="math_block">
+<mi>p</mi><mo>=</mo><mfrac><mrow><mn>3</mn><mi>a</mi><mi>c</mi><mo>&minus;</mo><msup><mi>b</mi><mn>2</mn></msup></mrow><mrow><mn>3</mn><msup><mi>a</mi><mn>2</mn></msup></mrow></mfrac></math><math class="math_block">
+<mi>q</mi><mo>=</mo><mfrac><mrow><mn>2</mn><msup><mi>b</mi><mn>3</mn></msup><mo>&minus;</mo><mn>9</mn><mi>a</mi><mi>b</mi><mi>c</mi><mo>+</mo><mn>27</mn><msup><mi>a</mi><mn>2</mn></msup><mi>d</mi></mrow><mrow><mn>27</mn><msup><mi>a</mi><mn>3</mn></msup></mrow></mfrac></math><p>Now, instead of finding the roots of the original cubic, we'll find the roots of the depressed cubic. A root <math>
+<msub><mi>t</mi><mi>i</mi></msub></math> of the depressed cubic is the root <math>
+<msub><mi>x</mi><mi>i</mi></msub></math> of the original cubic by the relation</p>
+<math class="math_block">
+<msub><mi>x</mi><mi>i</mi></msub><mo>=</mo><msub><mi>t</mi><mi>i</mi></msub><mo>&minus;</mo><mfrac><mrow><mi>b</mi></mrow><mrow><mn>3</mn><mi>a</mi></mrow></mfrac></math><p>for <math>
+<mi>i</mi><mo>=</mo><mn>1</mn><ms>,&nbsp;</ms><mn>2</mn><ms>,&nbsp;</ms><mn>3</mn></math>.</p>
+<p>We can find the roots of the depressed cubic and use this relation to obtain the roots of the original cubic. Okay so how do we find the roots of the depressed cubic? It starts with the discriminant, which is</p>
+<math class="math_block">
+<mo>&minus;</mo><mi>(</mi><mn>4</mn><msup><mi>p</mi><mn>3</mn></msup><mo>+</mo><mn>27</mn><msup><mi>q</mi><mn>2</mn></msup><mi>)</mi></math><p>The discriminant is important because it tells us the number of solutions to the depressed cubic equation, either 1, 2 or 3. We'll use a different method of calculating the roots depending on how many solutions we have to avoid imaginary numbers. The following rules determine the number of solutions given a discriminant <math>
+<mi>d</mi></math>.</p>
+<p>If <math>
+<mi>p</mi><mo>=</mo><mi>q</mi><mo>=</mo><mn>0</mn></math>, 0 is a triple root of the cubic and the single solution, otherwise</p>
+<ul><li>If <math>
+<mi>d</mi><mo>></mo><mn>0</mn></math>, 1 solution</li><li> If <math>
+<mi>d</mi><mo><</mo><mn>0</mn></math>, 3 solutions</li><li> If <math>
+<mi>d</mi><mo>=</mo><mn>0</mn></math>, 2 solutions</li></ul><h3>1 solution</h3>
+<p>We have one solution when the discriminant is greater than zero . In this case we'll find the root using Cardano's formula.</p>
+<math class="math_block">
+<mroot><mrow><mo>&minus;</mo><mfrac><mrow><mi>q</mi></mrow><mrow><mn>2</mn></mrow></mfrac><mo>+</mo><msqrt><mrow><mfrac><mrow><msup><mi>q</mi><mn>2</mn></msup></mrow><mrow><mn>4</mn></mrow></mfrac><mo>+</mo><mfrac><mrow><msup><mi>p</mi><mn>3</mn></msup></mrow><mrow><mn>27</mn></mrow></mfrac></mrow></msqrt></mrow><mi>3</mi></mroot><mo>+</mo><mroot><mrow><mo>&minus;</mo><mfrac><mrow><mi>q</mi></mrow><mrow><mn>2</mn></mrow></mfrac><mo>&minus;</mo><msqrt><mrow><mfrac><mrow><msup><mi>q</mi><mn>2</mn></msup></mrow><mrow><mn>4</mn></mrow></mfrac><mo>+</mo><mfrac><mrow><msup><mi>p</mi><mn>3</mn></msup></mrow><mrow><mn>27</mn></mrow></mfrac></mrow></msqrt></mrow><mi>3</mi></mroot></math><h3>2 solutions</h3>
+<p>When the discriminant is equal to zero, we have two solutions. In this case we have a single root at</p>
+<math class="math_block">
+<mfrac><mrow><mn>3</mn><mi>q</mi></mrow><mrow><mi>p</mi></mrow></mfrac></math><p>and a double root at</p>
+<math class="math_block">
+<mo>&minus;</mo><mfrac><mrow><mn>3</mn><mi>q</mi></mrow><mrow><mn>2</mn><mi>p</mi></mrow></mfrac></math><h3>3 solutions</h3>
+<p>We have three solutions when the discriminant is less than zero. In this case we'll use a trigonometric formula to find each root:</p>
+<math class="math_block">
+<msub><mi>t</mi><mi>k</mi></msub><mo>=</mo><mn>2</mn><msqrt><mrow><mo>&minus;</mo><mfrac><mrow><mi>p</mi></mrow><mrow><mn>3</mn></mrow></mfrac></mrow></msqrt><mo>cos</mo><mo>[</mo><mfrac><mrow><mn>1</mn></mrow><mrow><mn>3</mn></mrow></mfrac><mo>arccos</mo><mo>(</mo><mfrac><mrow><mn>3</mn><mi>q</mi></mrow><mrow><mn>2</mn><mi>p</mi></mrow></mfrac><msqrt><mrow><mfrac><mrow><mo>&minus;</mo><mn>3</mn></mrow><mrow><mi>p</mi></mrow></mfrac></mrow></msqrt><mo>)</mo><mo>&minus;</mo><mfrac><mrow><mn>2</mn><mo>pi</mo><mi>k</mi></mrow><mrow><mn>3</mn></mrow></mfrac><mo>]</mo></math><p>for <math>
+<mi>k</mi><mo>=</mo><mn>0</mn><ms>,&nbsp;</ms><mn>1</mn><ms>,&nbsp;</ms><mn>2</mn></math>.</p>
+<p>Now that we have the roots of the depressed cubic, we can find the roots of the original cubic using the aforementioned relation. Then plug each root into <math>
+<mi>f</mi><mi>(</mi><mi>t</mi><mi>)</mi></math> to get the overall shortest distance squared, just don't forget to take the square root for the actual distance.</p>
+<h2>The implementation</h2>
+<pre><code><span style="color: rgb(197, 134, 192);">fn</span> <span style="color: rgb(220, 220, 170);">find_dist_to_bezier</span>(p: &Vector, s: &Vector, c: &Vector, e: &Vector) -&gt; <span style="color: rgb(78, 201, 176);">f64</span> {
+	<span style="color: rgb(197, 134, 192);">let</span> sc = Vector { x: c.x - s.x, y: c.y - s.y };
+	<span style="color: rgb(197, 134, 192);">let</span> ps = Vector { x: s.x - p.x, y: s.y - p.y };
+
+	<span style="color: rgb(106, 153, 85);">// Find cubic polynomial coefficients</span>
+	<span style="color: rgb(197, 134, 192);">let</span> a = Vector { x: s.x - <span style="color: rgb(181, 206, 168);">2.0</span> * c.x + e.x, y: s.y - <span style="color: rgb(181, 206, 168);">2.0</span> * c.y + e.y };
+	<span style="color: rgb(197, 134, 192);">let</span> d4 = a.x * a.x + a.y * a.y;
+	<span style="color: rgb(197, 134, 192);">let</span> d3 = a.x * sc.x + a.y * sc.y;
+	<span style="color: rgb(197, 134, 192);">let</span> d2 = a.x * ps.x + a.y * ps.y + <span style="color: rgb(181, 206, 168);">2.0</span> * sc.x * sc.x + <span style="color: rgb(181, 206, 168);">2.0</span> * sc.y * sc.y;
+	<span style="color: rgb(197, 134, 192);">let</span> d1 = sc.x * ps.x + sc.y * ps.y;
+	<span style="color: rgb(197, 134, 192);">let</span> d0 = ps.x * ps.x + ps.y * ps.y;
+
+	<span style="color: rgb(106, 153, 85);">// Find depressed cubic coefficients</span>
+	<span style="color: rgb(197, 134, 192);">let</span> dp = (d4 * d2 - <span style="color: rgb(181, 206, 168);">3.0</span> * d3 * d3) / (d4 * d4);
+	<span style="color: rgb(197, 134, 192);">let</span> dq = (<span style="color: rgb(181, 206, 168);">2.0</span> * d3 * d3 * d3 - d4 * d3 * d2 + d4 * d4 * d1) / (d4 * d4 * d4);
+
+	<span style="color: rgb(106, 153, 85);">// Find roots of depressed cubic</span>
+	<span style="color: rgb(197, 134, 192);">let</span> discriminant = <span style="color: rgb(181, 206, 168);">4.0</span> * dp * dp * dp + <span style="color: rgb(181, 206, 168);">27.0</span> * dq * dq;
+	<span style="color: rgb(197, 134, 192);">let</span> depressed_roots = <span style="color: rgb(197, 134, 192);">if</span> dp == <span style="color: rgb(181, 206, 168);">0.0</span> && dq == <span style="color: rgb(181, 206, 168);">0.0</span> {
+		<span style="color: rgb(106, 153, 85);">// 0 is the single solution</span>
+		vec![<span style="color: rgb(181, 206, 168);">0.0</span>]
+	} <span style="color: rgb(197, 134, 192);">else</span> <span style="color: rgb(197, 134, 192);">if</span> discriminant &gt; <span style="color: rgb(181, 206, 168);">0.0</span> {
+		<span style="color: rgb(106, 153, 85);">// Find the single solution using Cardano's formula</span>
+		<span style="color: rgb(197, 134, 192);">let</span> a = -dq / <span style="color: rgb(181, 206, 168);">2.0</span>;
+		<span style="color: rgb(197, 134, 192);">let</span> b = (discriminant / <span style="color: rgb(181, 206, 168);">108.0</span>).<span style="color: rgb(220, 220, 170);">sqrt</span>();
+		vec![(a + b).<span style="color: rgb(220, 220, 170);">cbrt</span>() + (a - b).<span style="color: rgb(220, 220, 170);">cbrt</span>()]
+	} <span style="color: rgb(197, 134, 192);">else</span> <span style="color: rgb(197, 134, 192);">if</span> discriminant &lt; <span style="color: rgb(181, 206, 168);">0.0</span> {
+		<span style="color: rgb(106, 153, 85);">// Find the three solutions using trigonometry</span>
+		<span style="color: rgb(197, 134, 192);">let</span> a = <span style="color: rgb(181, 206, 168);">2.0</span> * (-dp / <span style="color: rgb(181, 206, 168);">3.0</span>).<span style="color: rgb(220, 220, 170);">sqrt</span>();
+		<span style="color: rgb(197, 134, 192);">let</span> b = <span style="color: rgb(181, 206, 168);">1.0</span> / <span style="color: rgb(181, 206, 168);">3.0</span> * ((<span style="color: rgb(181, 206, 168);">3.0</span> * dq) / (<span style="color: rgb(181, 206, 168);">2.0</span> * dp) * (-<span style="color: rgb(181, 206, 168);">3.0</span> / dp).<span style="color: rgb(220, 220, 170);">sqrt</span>()).<span style="color: rgb(220, 220, 170);">acos</span>();
+		(<span style="color: rgb(181, 206, 168);">0</span>..<span style="color: rgb(181, 206, 168);">3</span>).<span style="color: rgb(220, 220, 170);">into_iter</span>().<span style="color: rgb(220, 220, 170);">map</span>(|k| a * (b - (<span style="color: rgb(181, 206, 168);">2.0</span> * PI * k <span style="color: rgb(197, 134, 192);">as</span> <span style="color: rgb(78, 201, 176);">f64</span> / <span style="color: rgb(181, 206, 168);">3.0</span>)).<span style="color: rgb(220, 220, 170);">cos</span>()).<span style="color: rgb(220, 220, 170);">collect</span>()
+	} <span style="color: rgb(197, 134, 192);">else</span> {
+		<span style="color: rgb(106, 153, 85);">// Find the two solutions</span>
+		<span style="color: rgb(197, 134, 192);">let</span> a = <span style="color: rgb(181, 206, 168);">3.0</span> * dq;
+		vec![a / dp, -a / (<span style="color: rgb(181, 206, 168);">2.0</span> * dp)]
+	};
+
+	<span style="color: rgb(106, 153, 85);">// Find minimum distance using the roots</span>
+	<span style="color: rgb(197, 134, 192);">let</span> <span style="color: rgb(197, 134, 192);">mut</span> min_dist = <span style="color: rgb(78, 201, 176);">f64</span>::MAX;
+	<span style="color: rgb(197, 134, 192);">for</span> root <span style="color: rgb(197, 134, 192);">in</span> depressed_roots {
+		<span style="color: rgb(106, 153, 85);">// Map depressed root to a root of the original cubic polynomial</span>
+		<span style="color: rgb(197, 134, 192);">let</span> t = root - d3 / d4;
+
+		<span style="color: rgb(106, 153, 85);">// Find distance using the 4th degree polynomial</span>
+		<span style="color: rgb(197, 134, 192);">let</span> t = t.<span style="color: rgb(220, 220, 170);">max</span>(<span style="color: rgb(181, 206, 168);">0.0</span>).<span style="color: rgb(220, 220, 170);">min</span>(<span style="color: rgb(181, 206, 168);">1.0</span>);
+		<span style="color: rgb(197, 134, 192);">let</span> dist = (d4 * t.<span style="color: rgb(220, 220, 170);">powf</span>(<span style="color: rgb(181, 206, 168);">4.0</span>) + <span style="color: rgb(181, 206, 168);">4.0</span> * d3 * t.<span style="color: rgb(220, 220, 170);">powf</span>(<span style="color: rgb(181, 206, 168);">3.0</span>) + <span style="color: rgb(181, 206, 168);">2.0</span> * d2 * t.<span style="color: rgb(220, 220, 170);">powf</span>(<span style="color: rgb(181, 206, 168);">2.0</span>) + <span style="color: rgb(181, 206, 168);">4.0</span> * d1 * t + d0).<span style="color: rgb(220, 220, 170);">sqrt</span>();
+
+		<span style="color: rgb(106, 153, 85);">// Compare with current minimal distance</span>
+		<span style="color: rgb(197, 134, 192);">if</span> dist &lt; min_dist {
+			min_dist = dist;
+		}
+	}
+
+	min_dist
+}
+</code></pre>
+<p>This code simply follows the explanation step by step. We can now use these two functions to generate an unsigned distance field of each glyph.</p>
+<h1>Calculating the sign of the distance</h1>
+<p>In this part, we'll learn how to find the sign of the distance calculated in part two. The functions we'll need to implement are <code class="inline_code">find_cross_num_of_line()</code> and <code class="inline_code">find_cross_num_of_bezier()</code>. The parity of the total crossing number will give us the sign of the distance with respect to a pixel center <code class="inline_code">p</code> of the signed distance field. Like calculating the distance, the sign of the distance can also be found in constant time.</p>
+<p>The crossing number algorithm is quite simple in theory but there are some edge cases that make implementing it not so straight forward in practice. Dan Sunday's article titled <a href="http://geomalgorithms.com/a03-_inclusion.html">"Point in Polygon Inclusion"</a> is a great resource on this topic. I'll summarize it but I strongly recommend you check it out for more detail.</p>
+<h2>The algorithm</h2>
+<img src="crossing_number.png" alt="" /><p>Given a point and a closed polygon, form a ray from the point outwards in any direction. If the ray intersects the polygon's edge an odd number of times, the point is inside, if the intersection happens and even number of times, the point is outside. Using this method, we'll determine whether our point <code class="inline_code">p</code> is inside or outside the glyph. If <code class="inline_code">p</code> is inside, the sign of the distance will be positive, if outside, the distance will be negative. If <code class="inline_code">p</code> is exactly on the edge of the glyph, it's distance will be zero so it doesn't matter what we make the sign.</p>
+<p>We have to be careful about situations where the ray either intersects a point where two edges meet or edges parallel to the ray as shown below.</p>
+<img src="crossing_number_edge_cases.png" alt="edge cases in the crossing number algorithm" /><p>To handle these situations, we'll need to ensure the ray is horizontal and follow these edge crossing rules.</p>
+<ol><li>An upward edge includes its starting endpoint and excludes its final endpoint</li><li>A downward edge excludes its starting endpoint and includes its final endpoint</li><li>Horizontal edges are excluded</li><li>The edge-ray intersection point must be strictly right of the point</li></ol><p>So how will we apply this to our algorithm? Let's take another look at the pseudo code from part one.</p>
+<pre><code>for each glyph g {
+	for each pixel center p in g's distance field {
+		let min_dist = +infinity
+		let total_cross_num = 0
+
+		for each curve c in g {
+			let dist = distance from p to c
+			let cross_num = crossing number of c with respect to p
+
+			if dist < min_dist {
+				min_dist = dist
+			}
+
+			total_cross_num += cross_num
+		}
+
+		let signed_dist = if total_cross_num % 2 == 0 {
+			-min_dist
+		} else {
+			min_dist
+		}
+	}
+}
+</code></pre>
+<p>We're going calculate the crossing number of each edge in the glyph with respect to <code class="inline_code">p</code>. When we're done iterating over all the edges, we'll have the total crossing number of <code class="inline_code">p</code> so we can find the sign of <code class="inline_code">p</code>'s distance.</p>
+<h2>The crossing number of a line</h2>
+<pre><code><span style="color: rgb(197, 134, 192);">fn</span> <span style="color: rgb(220, 220, 170);">find_cross_num_of_line</span>(p: &Vector, s: &Vector, e: &Vector) -&gt; <span style="color: rgb(78, 201, 176);">u32</span> {
+	<span style="color: rgb(197, 134, 192);">let</span> diff = Vector { x: e.x - s.x, y: e.y - s.y };
+
+	<span style="color: rgb(106, 153, 85);">// Ignore if line segment is horizontal</span>
+	<span style="color: rgb(197, 134, 192);">if</span> diff.y == <span style="color: rgb(181, 206, 168);">0.0</span> {
+		return <span style="color: rgb(181, 206, 168);">0</span>;
+	}
+
+	<span style="color: rgb(106, 153, 85);">// Find single crossing point</span>
+	<span style="color: rgb(197, 134, 192);">let</span> t = (p.y - s.y) / diff.y;
+	<span style="color: rgb(197, 134, 192);">let</span> x = s.x + t * diff.x;
+
+	<span style="color: rgb(106, 153, 85);">// Count if crossing point is to the right and if one of the</span>
+	<span style="color: rgb(106, 153, 85);">// following is true where its</span>
+	<span style="color: rgb(106, 153, 85);">// - Between the endpoints</span>
+	<span style="color: rgb(106, 153, 85);">// - At the start of an upward line segment</span>
+	<span style="color: rgb(106, 153, 85);">// - At the end of a downward line segment</span>
+	<span style="color: rgb(197, 134, 192);">if</span> x &gt; p.x &&
+		((t &gt; <span style="color: rgb(181, 206, 168);">0.0</span> && t &lt; <span style="color: rgb(181, 206, 168);">1.0</span>) ||
+		(t == <span style="color: rgb(181, 206, 168);">0.0</span> && diff.y.<span style="color: rgb(220, 220, 170);">is_sign_positive</span>()) ||
+		(t == <span style="color: rgb(181, 206, 168);">1.0</span> && diff.y.<span style="color: rgb(220, 220, 170);">is_sign_negative</span>()))
+	{ <span style="color: rgb(181, 206, 168);">1</span> } <span style="color: rgb(197, 134, 192);">else</span> { <span style="color: rgb(181, 206, 168);">0</span> }
+}
+</code></pre>
+<p>We see parameterization again here, <code class="inline_code">t</code> tells us how far along the line segment the point of intersection is. If <code class="inline_code">t = 0</code>, the intersection point is at <code class="inline_code">s</code>, and if <code class="inline_code">t = 1</code>, the intersection point is at <code class="inline_code">e</code>. So for the horizontal ray to intersect the line segment, <code class="inline_code">t</code> must be in the range [0, 1]. The sign of the y coordinate of the vector defined by <code class="inline_code">s</code> and <code class="inline_code">e</code> tells us whether the line is upward or downward trending.</p>
+<h2>The crossing number of a quadratic Bézier</h2>
+<p>Now let's look at how we can calculate the crossing number when we're dealing with a quadratic Bézier. As you can imagine, this is harder to find. We still want to find a t value for the ray-curve intersection point just like we did for the line. In this case we could have zero, one or two intersection points as shown below, so we'll need a t value for each one.</p>
+<img src="crossing_number_quad_intersections.png" alt="quadratic Bézier ray intersections" /><p> </p>
+<p>Remember the formula for a quadratic Bézier</p>
+<math class="math_block">
+<mi>B</mi><mi>(</mi><mi>t</mi><mi>)</mi><mo>=</mo><mi>(</mi><mn>1</mn><mo>&minus;</mo><mi>t</mi><msup><mi>)</mi><mn>2</mn></msup><msub><mi>P</mi><mn>0</mn></msub><mo>+</mo><mn>2</mn><mi>t</mi><mi>(</mi><mn>1</mn><mo>&minus;</mo><mi>t</mi><mi>)</mi><msub><mi>P</mi><mn>1</mn></msub><mo>+</mo><msup><mi>t</mi><mn>2</mn></msup><msub><mi>P</mi><mn>2</mn></msub></math><p>where <math>
+<mi>t</mi><mo>&isin;</mo><mi>[</mi><mn>0</mn><ms>,&nbsp;</ms><mn>1</mn><mi>]</mi></math> and <math>
+<msub><mi>P</mi><mn>0</mn></msub><mi>(</mi><msub><mi>x</mi><mn>0</mn></msub><ms>,&nbsp;</ms><msub><mi>y</mi><mn>0</mn></msub><mi>)</mi><ms>,&nbsp;</ms><msub><mi>P</mi><mn>1</mn></msub><mi>(</mi><msub><mi>x</mi><mn>1</mn></msub><ms>,&nbsp;</ms><msub><mi>y</mi><mn>1</mn></msub><mi>)</mi></math> and <math>
+<msub><mi>P</mi><mn>2</mn></msub><mi>(</mi><msub><mi>x</mi><mn>2</mn></msub><ms>,&nbsp;</ms><msub><mi>y</mi><mn>2</mn></msub><mi>)</mi></math> are the control points? It can be written a different way:</p>
+<math class="math_block">
+<mi>B</mi><mi>(</mi><mi>t</mi><mi>)</mi><mo>=</mo><msub><mi>P</mi><mn>1</mn></msub><mo>+</mo><mi>(</mi><mn>1</mn><mo>&minus;</mo><msup><mi>t</mi><mn>2</mn></msup><mi>)</mi><mi>(</mi><msub><mi>P</mi><mn>0</mn></msub><mo>&minus;</mo><msub><mi>P</mi><mn>1</mn></msub><mi>)</mi><mo>+</mo><msup><mi>t</mi><mn>2</mn></msup><mi>(</mi><msub><mi>P</mi><mn>2</mn></msub><mo>&minus;</mo><msub><mi>P</mi><mn>1</mn></msub><mi>)</mi></math><p>and if we only consider the <math>
+<mi>y</mi></math> coordinate for the points obtained from this formula, <math>
+<mi>B</mi><mi>(</mi><mi>t</mi><mi>)</mi><mo>=</mo><mi>(</mi><mi>x</mi><ms>,&nbsp;</ms><mi>y</mi><mi>)</mi></math> we have</p>
+<math class="math_block">
+<mi>y</mi><mo>=</mo><msub><mi>y</mi><mn>1</mn></msub><mo>+</mo><mi>(</mi><mn>1</mn><mo>&minus;</mo><mi>t</mi><msup><mi>)</mi><mn>2</mn></msup><mi>(</mi><msub><mi>y</mi><mn>0</mn></msub><mo>&minus;</mo><msub><mi>y</mi><mn>1</mn></msub><mi>)</mi><mo>+</mo><msup><mi>t</mi><mn>2</mn></msup><mi>(</mi><msub><mi>y</mi><mn>2</mn></msub><mo>&minus;</mo><msub><mi>y</mi><mn>1</mn></msub><mi>)</mi></math><p>Again, what we're after is to find a <math>
+<mi>t</mi></math> value for the intersection points of a ray and a quadratic Bézier. Since our ray is horizontal, it can be defined by a single <math>
+<mi>y</mi></math> coordinate <math>
+<msub><mi>y</mi><mi>r</mi></msub></math>. Using the above formula and the desired coordinate <math>
+<msub><mi>y</mi><mi>r</mi></msub></math> we can find the <math>
+<mi>t</mi></math> value by solving</p>
+<math class="math_block">
+<msub><mi>y</mi><mi>r</mi></msub><mo>=</mo><msub><mi>y</mi><mn>1</mn></msub><mo>+</mo><mi>(</mi><mn>1</mn><mo>&minus;</mo><mi>t</mi><msup><mi>)</mi><mn>2</mn></msup><mi>(</mi><msub><mi>y</mi><mn>0</mn></msub><mo>&minus;</mo><msub><mi>y</mi><mn>1</mn></msub><mi>)</mi><mo>+</mo><msup><mi>t</mi><mn>2</mn></msup><mi>(</mi><msub><mi>y</mi><mn>2</mn></msub><mo>&minus;</mo><msub><mi>y</mi><mn>1</mn></msub><mi>)</mi></math><p>for <math>
+<mi>t</mi></math>. anath p gives the solution on <a href="https://math.stackexchange.com/a/3283923/825984">this mathematics stack exchange answer</a>.</p>
+<math class="math_block">
+<mi>t</mi><mo>=</mo><mfrac><mrow><mi>(</mi><msub><mi>y</mi><mn>0</mn></msub><mo>&minus;</mo><msub><mi>y</mi><mn>1</mn></msub><mi>)</mi><mo>&plusmn;</mo><msqrt><mrow><msub><mi>y</mi><mi>r</mi></msub><msub><mi>y</mi><mn>0</mn></msub><mo>&minus;</mo><mn>2</mn><msub><mi>y</mi><mi>r</mi></msub><msub><mi>y</mi><mn>1</mn></msub><mo>+</mo><msub><mi>y</mi><mi>r</mi></msub><msub><mi>y</mi><mn>2</mn></msub><mo>&minus;</mo><msub><mi>y</mi><mn>0</mn></msub><msub><mi>y</mi><mn>2</mn></msub><mo>+</mo><msubsup><mi>y</mi><mn>1</mn><mn>2</mn></msubsup></mrow></msqrt></mrow><mrow><msub><mi>y</mi><mn>0</mn></msub><mo>&minus;</mo><mn>2</mn><msub><mi>y</mi><mn>1</mn></msub><mo>+</mo><msub><mi>y</mi><mn>2</mn></msub></mrow></mfrac></math><p>Note there is a <math>
+<mo>&plusmn;</mo></math> in the formula which gives us our two solutions. The two <math>
+<mi>t</mi></math> values will be the same when we have one solution. In the case where the ray does not intersect the curve at all, the square root part of the formula will be imaginary, correctly giving us no real solution.</p>
+<p>There's one part we need to be careful of, diving by zero. When the denominator <math>
+<msub><mi>y</mi><mn>0</mn></msub><mo>&minus;</mo><mn>2</mn><msub><mi>y</mi><mn>1</mn></msub><mo>+</mo><msub><mi>y</mi><mn>2</mn></msub></math> is zero, <math>
+<msub><mi>y</mi><mn>2</mn></msub><mo>&minus;</mo><msub><mi>y</mi><mn>1</mn></msub><mo>=</mo><msub><mi>y</mi><mn>1</mn></msub><mo>&minus;</mo><msub><mi>y</mi><mn>0</mn></msub></math>. So if you graph the control points <math>
+<msub><mi>P</mi><mn>0</mn></msub><ms>,&nbsp;</ms><msub><mi>P</mi><mn>1</mn></msub><ms>,&nbsp;</ms><msub><mi>P</mi><mn>2</mn></msub></math> on an xy-plane, along the y-axis, <math>
+<msub><mi>P</mi><mn>1</mn></msub></math> is equidistant from <math>
+<msub><mi>P</mi><mn>0</mn></msub></math> and <math>
+<msub><mi>P</mi><mn>2</mn></msub></math>. This means if you graph the <math>
+<mi>y</mi></math> coordinates with respect to <math>
+<mi>t</mi></math>, it results in a line</p>
+<math class="math_block">
+<mtable>
+<mtr><mtd class="math_td_left"><mi>y</mi></mtd><mtd class="math_td_right"><mo>=</mo><msub><mi>y</mi><mn>1</mn></msub><mo>+</mo><mi>(</mi><mn>1</mn><mo>&minus;</mo><mi>t</mi><msup><mi>)</mi><mn>2</mn></msup><mi>(</mi><msub><mi>y</mi><mn>0</mn></msub><mo>&minus;</mo><msub><mi>y</mi><mn>1</mn></msub><mi>)</mi><mo>+</mo><msup><mi>t</mi><mn>2</mn></msup><mi>(</mi><msub><mi>y</mi><mn>2</mn></msub><mo>&minus;</mo><msub><mi>y</mi><mn>1</mn></msub><mi>)</mi></mtd></mtr>
+<mtr><mtd class="math_td_left"></mtd><mtd class="math_td_right"><mo>=</mo><mn>2</mn><mi>c</mi><mi>t</mi><mo>+</mo><msub><mi>y</mi><mn>1</mn></msub><mo>&minus;</mo><mi>c</mi></mtd></mtr>
+</mtable>
+</math><p>where <math>
+<mi>c</mi><mo>=</mo><msub><mi>y</mi><mn>2</mn></msub><mo>&minus;</mo><msub><mi>y</mi><mn>1</mn></msub><mo>=</mo><msub><mi>y</mi><mn>1</mn></msub><mo>&minus;</mo><msub><mi>y</mi><mn>0</mn></msub></math>.</p>
+<p>Let's see an example, here we have a curve plotted on an xy-plane.</p>
+<img src="bezier_with_linear_y_1.png" alt="quadratic Bézier with linear y coordinates, xy-plane" /><p>And here is the same curve with its y coordinates plotted with respect to <math>
+<mi>t</mi></math>.</p>
+<math class="math_block">
+<mi>y</mi><mo>=</mo><mn>4</mn><mo>+</mo><mi>(</mi><mn>1</mn><mo>&minus;</mo><mi>t</mi><msup><mi>)</mi><mn>2</mn></msup><mi>(</mi><mn>0</mn><mo>&minus;</mo><mn>4</mn><mi>)</mi><mo>+</mo><msup><mi>t</mi><mn>2</mn></msup><mi>(</mi><mn>8</mn><mo>&minus;</mo><mn>4</mn><mi>)</mi><mo>=</mo><mn>8</mn><mi>t</mi></math><p>Which gives us the following graph.</p>
+<img src="bezier_with_linear_y_2.png" alt="quadratic Bézier with linear y coordinates, yt-plane" /><p>As you can see, the y coordinate of the points on the curve form a line. So why is this important? Well it means there will only be one possible intersection point and we can use the previous solution for a line to find it.</p>
+<p>Alright, so we now know how to find the <math>
+<mi>t</mi></math> values of the ray-curve intersection points. Let's define the curve crossing rules to handle the edge cases.</p>
+<ol><li>A curve's starting endpoint with a downward trend is excluded</li><li>A curve's final endpoint with an upward trend is excluded</li><li>The ray-curve intersection point must be strictly right of the point</li><li>A curve excludes its non-endpoint point with a tangent slope of 0</li></ol><p>In most cases the trend of an endpoint is simply its tangent. Given a Bézier defined by a start point <math>
+<mi>S</mi><mi>(</mi><msub><mi>x</mi><mi>s</mi></msub><ms>,&nbsp;</ms><msub><mi>y</mi><mi>s</mi></msub><mi>)</mi></math>, control point <math>
+<mi>C</mi><mi>(</mi><msub><mi>x</mi><mi>c</mi></msub><ms>,&nbsp;</ms><msub><mi>y</mi><mi>c</mi></msub><mi>)</mi></math> and end point <math>
+<mi>E</mi><mi>(</mi><msub><mi>x</mi><mi>e</mi></msub><ms>,&nbsp;</ms><msub><mi>y</mi><mi>e</mi></msub><mi>)</mi></math>, the trend at <math>
+<mi>S</mi></math> can be found by the sign of <math>
+<msub><mi>y</mi><mi>c</mi></msub><mo>&minus;</mo><msub><mi>y</mi><mi>s</mi></msub></math> and the trend at <math>
+<mi>E</mi></math> can be found by the sign of <math>
+<msub><mi>y</mi><mi>e</mi></msub><mo>&minus;</mo><msub><mi>y</mi><mi>c</mi></msub></math>. This works generally but consider a curve with <math>
+<mi>S</mi></math> horizontal to <math>
+<mi>C</mi></math> like below.</p>
+<img src="bezier_with_horizontal_start_and_end.png" alt="quadratic Bézier with horizontal start and control point" /><p>a <math>
+<msub><mi>y</mi><mi>c</mi></msub><mo>&minus;</mo><msub><mi>y</mi><mi>s</mi></msub><mo>=</mo><mn>0</mn></math> so in this case we'll need to look at the sign of <math>
+<msub><mi>y</mi><mi>e</mi></msub><mo>&minus;</mo><msub><mi>y</mi><mi>s</mi></msub></math> instead. Rule four is regarding the intersection point shown in the below example.</p>
+<img src="bezier_with_intersection_point_between_endpoints.png" alt="quadratic Bézier with an intersection point between endpoints" /><p>In this case, the ray isn't crossing to the inside of the curve (it's tangent has a slope of 0) so we should disregard this point. If this situation happens at an endpoint of the curve, we'll need to follow the rules defined. In the below example we have two solutions at <math>
+<mi>t</mi><mo>=</mo><mn>0</mn></math> and an upward trend so it should be counted as a cross.</p>
+<img src="bezier_with_intersection_point_at_start_endpont.png" alt="quadratic Bézier with an intersection point at start endpoint" /><p>Finally, here is the code.</p>
+<pre><code><span style="color: rgb(197, 134, 192);">fn</span> <span style="color: rgb(220, 220, 170);">find_cross_num_of_bezier</span>(p: &Vector, s: &Vector, c: &Vector, e: &Vector) -&gt; <span style="color: rgb(78, 201, 176);">u32</span> {
+	<span style="color: rgb(197, 134, 192);">let</span> u = s.y - <span style="color: rgb(181, 206, 168);">2.0</span> * c.y + e.y;
+
+	<span style="color: rgb(106, 153, 85);">// Determine if y varies linearly</span>
+	<span style="color: rgb(197, 134, 192);">if</span> u == <span style="color: rgb(181, 206, 168);">0.0</span> {
+		<span style="color: rgb(106, 153, 85);">// Find single crossing point</span>
+		<span style="color: rgb(197, 134, 192);">let</span> diff = e.y - s.y;
+		<span style="color: rgb(197, 134, 192);">let</span> t = (p.y - s.y) / diff;
+		<span style="color: rgb(197, 134, 192);">let</span> a = <span style="color: rgb(181, 206, 168);">1.0</span> - t;
+		<span style="color: rgb(197, 134, 192);">let</span> x = a * a * s.x + <span style="color: rgb(181, 206, 168);">2.0</span> * a * t * c.x + t * t * e.x;
+
+		<span style="color: rgb(106, 153, 85);">// Count if crossing point is to the right and if one of the following is true where its</span>
+		<span style="color: rgb(106, 153, 85);">// - Between the endpoints</span>
+		<span style="color: rgb(106, 153, 85);">// - At the start of an upward line segment</span>
+		<span style="color: rgb(106, 153, 85);">// - At the end of a downward line segment</span>
+		return <span style="color: rgb(197, 134, 192);">if</span> x &gt; p.x && ((t &gt; <span style="color: rgb(181, 206, 168);">0.0</span> && t &lt; <span style="color: rgb(181, 206, 168);">1.0</span>) ||
+		         (t == <span style="color: rgb(181, 206, 168);">0.0</span> && diff.<span style="color: rgb(220, 220, 170);">is_sign_positive</span>()) ||
+				 (t == <span style="color: rgb(181, 206, 168);">1.0</span> && diff.<span style="color: rgb(220, 220, 170);">is_sign_negative</span>()))
+		{ <span style="color: rgb(181, 206, 168);">1</span> } <span style="color: rgb(197, 134, 192);">else</span> { <span style="color: rgb(181, 206, 168);">0</span> }
+	}
+	
+	<span style="color: rgb(197, 134, 192);">let</span> w = p.y * s.y - <span style="color: rgb(181, 206, 168);">2.0</span> * p.y * c.y + p.y * e.y - s.y * e.y + c.y * c.y;
+
+	<span style="color: rgb(106, 153, 85);">// If w is negative, there are no solutions</span>
+	<span style="color: rgb(197, 134, 192);">if</span> w.<span style="color: rgb(220, 220, 170);">is_sign_negative</span>() {
+		return <span style="color: rgb(181, 206, 168);">0</span>;
+	}
+
+	<span style="color: rgb(106, 153, 85);">// Find two crossing points</span>
+	<span style="color: rgb(197, 134, 192);">let</span> w = w.<span style="color: rgb(220, 220, 170);">sqrt</span>();
+	<span style="color: rgb(197, 134, 192);">let</span> v = s.y - c.y;
+
+	<span style="color: rgb(197, 134, 192);">let</span> t1 = (v + w) / u;
+	<span style="color: rgb(197, 134, 192);">let</span> a1 = <span style="color: rgb(181, 206, 168);">1.0</span> - t1;
+	<span style="color: rgb(197, 134, 192);">let</span> x1 = a1 * a1 * s.x + <span style="color: rgb(181, 206, 168);">2.0</span> * a1 * t1 * c.x + t1 * t1 * e.x;
+
+	<span style="color: rgb(197, 134, 192);">let</span> t2 = (v - w) / u;
+	<span style="color: rgb(197, 134, 192);">let</span> a2 = <span style="color: rgb(181, 206, 168);">1.0</span> - t2;
+	<span style="color: rgb(197, 134, 192);">let</span> x2 = a2 * a2 * s.x + <span style="color: rgb(181, 206, 168);">2.0</span> * a2 * t2 * c.x + t2 * t2 * e.x;
+
+	<span style="color: rgb(106, 153, 85);">// Find curve direction</span>
+	<span style="color: rgb(197, 134, 192);">let</span> s_dir = <span style="color: rgb(197, 134, 192);">if</span> s.y == c.y { e.y - s.y } <span style="color: rgb(197, 134, 192);">else</span> { c.y - s.y };
+	<span style="color: rgb(197, 134, 192);">let</span> e_dir = <span style="color: rgb(197, 134, 192);">if</span> c.y == e.y { e.y - s.y } <span style="color: rgb(197, 134, 192);">else</span> { e.y - c.y };
+
+	<span style="color: rgb(106, 153, 85);">// Find crossing number</span>
+	<span style="color: rgb(197, 134, 192);">if</span> t1 == t2 {
+		<span style="color: rgb(106, 153, 85);">// There are two equal solutions, count if crossing point is to the right</span>
+		<span style="color: rgb(106, 153, 85);">// and if one of the following is true where its</span>
+		<span style="color: rgb(106, 153, 85);">// - At the start of an upward curve</span>
+		<span style="color: rgb(106, 153, 85);">// - At the end of a downward curve</span>
+		<span style="color: rgb(197, 134, 192);">if</span> x1 &gt; p.x &&
+		 ((t1 == <span style="color: rgb(181, 206, 168);">0.0</span> && s_dir.<span style="color: rgb(220, 220, 170);">is_sign_positive</span>()) ||
+		  (t1 == <span style="color: rgb(181, 206, 168);">1.0</span> && e_dir.<span style="color: rgb(220, 220, 170);">is_sign_negative</span>()))
+		{ <span style="color: rgb(181, 206, 168);">1</span> } <span style="color: rgb(197, 134, 192);">else</span> { <span style="color: rgb(181, 206, 168);">0</span> }
+	}
+	<span style="color: rgb(197, 134, 192);">else</span> {
+		<span style="color: rgb(106, 153, 85);">// There are two distinct solutions, count if crossing point is to the right and</span>
+		<span style="color: rgb(106, 153, 85);">// if one of the following is true where its</span>
+		<span style="color: rgb(106, 153, 85);">// - Between the endpoints</span>
+		<span style="color: rgb(106, 153, 85);">// - At the start of an upward curve</span>
+		<span style="color: rgb(106, 153, 85);">// - At the end of a downward curve</span>
+		<span style="color: rgb(197, 134, 192);">let</span> <span style="color: rgb(197, 134, 192);">mut</span> count = <span style="color: rgb(181, 206, 168);">0</span>;
+
+		<span style="color: rgb(197, 134, 192);">if</span> x1 &gt; p.x && ((t1 &gt; <span style="color: rgb(181, 206, 168);">0.0</span> && t1 &lt; <span style="color: rgb(181, 206, 168);">1.0</span>) ||
+		  (t1 == <span style="color: rgb(181, 206, 168);">0.0</span> && s_dir.<span style="color: rgb(220, 220, 170);">is_sign_positive</span>()) ||
+		  (t1 == <span style="color: rgb(181, 206, 168);">1.0</span> && e_dir.<span style="color: rgb(220, 220, 170);">is_sign_negative</span>()))
+		{
+			count += <span style="color: rgb(181, 206, 168);">1</span>;
+		}
+
+		<span style="color: rgb(197, 134, 192);">if</span> x2 &gt; p.x && ((t2 &gt; <span style="color: rgb(181, 206, 168);">0.0</span> && t2 &lt; <span style="color: rgb(181, 206, 168);">1.0</span>) ||
+		  (t2 == <span style="color: rgb(181, 206, 168);">0.0</span> && s_dir.<span style="color: rgb(220, 220, 170);">is_sign_positive</span>()) ||
+		  (t2 == <span style="color: rgb(181, 206, 168);">1.0</span> && e_dir.<span style="color: rgb(220, 220, 170);">is_sign_negative</span>()))
+		{
+			count += <span style="color: rgb(181, 206, 168);">1</span>;
+		}
+
+		count
+	}
+}
+</code></pre>
+<p>Using these methods we can calculate the crossing number of a single signed distance field pixel center in constant time. We'll then use the parity of the total crossing number to determine whether the pixel is inside the glyph or out giving us the sign of the distance found in part two. At this point, we have a signed distance field for each of our glyphs.</p>
+<h1>Generating the texture atlas</h1>
+<p>In previous parts of this series, we learned how to generate signed distance fields for a set of glyphs in a TrueType font file. In this part, we'll generate a texture atlas of the signed distance fields.</p>
+<p>What we're after is to somehow pack rectangles of arbitrary sizes into a single rectangle of the smallest size possible. This is known as the <a href="https://en.wikipedia.org/wiki/Bin_packing_problem">bin packing problem</a>, which has an NP-hard computational complexity. Rather than finding the optimal solution we'll use a heuristic to find a reasonable one.</p>
+<pre><code>sort signed distance fields from largest area to smallest
+
+for each signed distance field f in set of signed distance fields {
+	for each texel t in texture atlas {
+		if f fits at t {
+			place f at t
+			continue to the next distance field
+		}
+	}
+
+	expand atlas in shorter dimension
+	place f in expanded space
+}
+</code></pre>
+<p>We'll start by sorting our signed distance field list from biggest area to smallest, this is our heuristic. We iterate over the sorted list and save the smaller ones for last because they fit better into the possible extra area created by the larger ones. Then we simply find the first place where the field can fit in the atlas and place it there. If it cannot fit anywhere in the atlas, we need to expand it to make room. We can either expand the atlas horizontally, adding columns or expand vertically, adding rows. We'll simply expand in the shorter direction so each expansion leaves the atlas dimensions at a reasonable minimum. It's a simple algorithm, but it works well. Let's see the implementation.</p>
+<pre><code><span style="color: rgb(197, 134, 192);">fn</span> <span style="color: rgb(220, 220, 170);">generate_atlas</span>(fields: &<span style="color: rgb(78, 201, 176);">Vec</span>&lt;<span style="color: rgb(78, 201, 176);">Vec</span>&lt;<span style="color: rgb(78, 201, 176);">Vec</span>&lt;<span style="color: rgb(78, 201, 176);">u8</span>&gt;&gt;&gt;) -&gt; <span style="color: rgb(78, 201, 176);">Vec</span>&lt;<span style="color: rgb(78, 201, 176);">Vec</span>&lt;<span style="color: rgb(78, 201, 176);">u8</span>&gt;&gt; {
+	<span style="color: rgb(106, 153, 85);">// Sort the glyphs from biggest to smallest area</span>
+	fields.<span style="color: rgb(220, 220, 170);">sort_unstable_by</span>(|a, b| (b.<span style="color: rgb(220, 220, 170);">len</span>() * b[<span style="color: rgb(181, 206, 168);">0</span>].<span style="color: rgb(220, 220, 170);">len</span>()).<span style="color: rgb(220, 220, 170);">cmp</span>(&(a.<span style="color: rgb(220, 220, 170);">len</span>() * a[<span style="color: rgb(181, 206, 168);">0</span>].<span style="color: rgb(220, 220, 170);">len</span>())));
+
+	<span style="color: rgb(197, 134, 192);">let</span> <span style="color: rgb(197, 134, 192);">mut</span> atlas: <span style="color: rgb(78, 201, 176);">Vec</span>&lt;<span style="color: rgb(78, 201, 176);">Vec</span>&lt;<span style="color: rgb(78, 201, 176);">Option</span>&lt;<span style="color: rgb(78, 201, 176);">u8</span>&gt;&gt;&gt; = <span style="color: rgb(78, 201, 176);">Vec</span>::<span style="color: rgb(220, 220, 170);">new</span>();
+
+	'field_loop: <span style="color: rgb(197, 134, 192);">for</span> field <span style="color: rgb(197, 134, 192);">in</span> fields {
+		<span style="color: rgb(197, 134, 192);">let</span> atlas_height = atlas.<span style="color: rgb(220, 220, 170);">len</span>();
+		<span style="color: rgb(197, 134, 192);">let</span> atlas_width = <span style="color: rgb(197, 134, 192);">if</span> atlas_height == <span style="color: rgb(181, 206, 168);">0</span> { <span style="color: rgb(181, 206, 168);">0</span> } <span style="color: rgb(197, 134, 192);">else</span> { atlas[<span style="color: rgb(181, 206, 168);">0</span>].<span style="color: rgb(220, 220, 170);">len</span>() };
+		
+		<span style="color: rgb(197, 134, 192);">let</span> field_height = field.<span style="color: rgb(220, 220, 170);">len</span>() <span style="color: rgb(197, 134, 192);">as</span> <span style="color: rgb(78, 201, 176);">usize</span>;
+		<span style="color: rgb(197, 134, 192);">let</span> field_width = field[<span style="color: rgb(181, 206, 168);">0</span>].<span style="color: rgb(220, 220, 170);">len</span>() <span style="color: rgb(197, 134, 192);">as</span> <span style="color: rgb(78, 201, 176);">usize</span>;
+		
+		<span style="color: rgb(197, 134, 192);">let</span> atlas_row_bound = atlas_height.<span style="color: rgb(220, 220, 170);">saturating_sub</span>(field_height - <span style="color: rgb(181, 206, 168);">1</span>);
+		<span style="color: rgb(197, 134, 192);">let</span> atlas_col_bound = atlas_width.<span style="color: rgb(220, 220, 170);">saturating_sub</span>(field_width - <span style="color: rgb(181, 206, 168);">1</span>);
+
+		<span style="color: rgb(197, 134, 192);">for</span> atlas_row_index <span style="color: rgb(197, 134, 192);">in</span> <span style="color: rgb(181, 206, 168);">0</span>..atlas_row_bound {
+			'atlas_col_loop: <span style="color: rgb(197, 134, 192);">for</span> atlas_col_index <span style="color: rgb(197, 134, 192);">in</span> <span style="color: rgb(181, 206, 168);">0</span>..atlas_col_bound {
+
+				<span style="color: rgb(197, 134, 192);">for</span> field_row_index <span style="color: rgb(197, 134, 192);">in</span> <span style="color: rgb(181, 206, 168);">0</span>..field_height {
+					<span style="color: rgb(197, 134, 192);">for</span> field_col_index <span style="color: rgb(197, 134, 192);">in</span> <span style="color: rgb(181, 206, 168);">0</span>..field_width {
+						<span style="color: rgb(197, 134, 192);">let</span> texel = atlas[atlas_row_index + field_row_index][atlas_col_index + field_col_index];
+
+						<span style="color: rgb(197, 134, 192);">if</span> texel.<span style="color: rgb(220, 220, 170);">is_some</span>() {
+							<span style="color: rgb(106, 153, 85);">// Field cannot fit here, move on to the next position</span>
+							continue 'atlas_col_loop;
+						}
+					}
+				}
+
+				<span style="color: rgb(106, 153, 85);">// Field can fit here</span>
+				<span style="color: rgb(220, 220, 170);">place_field</span>(&<span style="color: rgb(197, 134, 192);">mut</span> atlas, atlas_row_index, atlas_col_index, field);
+				continue 'field_loop;
+			}
+		}
+
+		<span style="color: rgb(106, 153, 85);">// Field cannot fit anywhere, expand atlas in shorter direction and place the field</span>
+		<span style="color: rgb(197, 134, 192);">let</span> vertical_expansion;
+		<span style="color: rgb(197, 134, 192);">let</span> horizontal_expansion;
+		<span style="color: rgb(197, 134, 192);">let</span> pos_row;
+		<span style="color: rgb(197, 134, 192);">let</span> pos_col;
+
+		<span style="color: rgb(197, 134, 192);">if</span> atlas_width + field_width &gt; atlas_height + field_height {
+			vertical_expansion = field_height;
+			horizontal_expansion = field_width.<span style="color: rgb(220, 220, 170);">saturating_sub</span>(atlas_width);
+			pos_row = atlas_height;
+			pos_col = <span style="color: rgb(181, 206, 168);">0</span>;
+		} <span style="color: rgb(197, 134, 192);">else</span> {
+			vertical_expansion = field_height.<span style="color: rgb(220, 220, 170);">saturating_sub</span>(atlas_height);
+			horizontal_expansion = field_width;
+			pos_row = <span style="color: rgb(181, 206, 168);">0</span>;
+			pos_col = atlas_width;
+		}
+
+		<span style="color: rgb(220, 220, 170);">expand_atlas</span>(&<span style="color: rgb(197, 134, 192);">mut</span> atlas, vertical_expansion, horizontal_expansion);
+		<span style="color: rgb(220, 220, 170);">place_field</span>(&<span style="color: rgb(197, 134, 192);">mut</span> atlas, pos_row, pos_col, glyph);
+	}
+
+	<span style="color: rgb(106, 153, 85);">// Zero out the unused regions</span>
+	<span style="color: rgb(197, 134, 192);">let</span> atlas_height = atlas.<span style="color: rgb(220, 220, 170);">len</span>();
+	<span style="color: rgb(197, 134, 192);">let</span> atlas_width = atlas[<span style="color: rgb(181, 206, 168);">0</span>].<span style="color: rgb(220, 220, 170);">len</span>();
+	<span style="color: rgb(197, 134, 192);">let</span> <span style="color: rgb(197, 134, 192);">mut</span> atlas_final = <span style="color: rgb(78, 201, 176);">Vec</span>::<span style="color: rgb(220, 220, 170);">with_capacity</span>(atlas_height);
+	
+	<span style="color: rgb(197, 134, 192);">for</span> row <span style="color: rgb(197, 134, 192);">in</span> atlas {
+		<span style="color: rgb(197, 134, 192);">let</span> <span style="color: rgb(197, 134, 192);">mut</span> row_final = <span style="color: rgb(78, 201, 176);">Vec</span>::<span style="color: rgb(220, 220, 170);">with_capacity</span>(atlas_width);
+
+		<span style="color: rgb(197, 134, 192);">for</span> texel <span style="color: rgb(197, 134, 192);">in</span> row {
+			row_final.<span style="color: rgb(220, 220, 170);">push</span>(<span style="color: rgb(197, 134, 192);">if</span> <span style="color: rgb(197, 134, 192);">let</span> <span style="color: rgb(78, 201, 176);">Some</span>(dist) = texel { dist } <span style="color: rgb(197, 134, 192);">else</span> { <span style="color: rgb(181, 206, 168);">0</span> });
+		}
+
+		atlas_final.<span style="color: rgb(220, 220, 170);">push</span>(row_final);
+	}
+
+	atlas_final
+}
+
+<span style="color: rgb(197, 134, 192);">fn</span> <span style="color: rgb(220, 220, 170);">place_field</span>(atlas: &<span style="color: rgb(197, 134, 192);">mut</span> <span style="color: rgb(78, 201, 176);">Vec</span>&lt;<span style="color: rgb(78, 201, 176);">Vec</span>&lt;<span style="color: rgb(78, 201, 176);">Option</span>&lt;<span style="color: rgb(78, 201, 176);">u8</span>&gt;&gt;&gt;, atlas_row: <span style="color: rgb(78, 201, 176);">usize</span>, atlas_col: <span style="color: rgb(78, 201, 176);">usize</span>, field: &<span style="color: rgb(78, 201, 176);">Vec</span>&lt;<span style="color: rgb(78, 201, 176);">Vec</span>&lt;<span style="color: rgb(78, 201, 176);">u8</span>&gt;&gt;) {
+	<span style="color: rgb(197, 134, 192);">let</span> field_height = field.<span style="color: rgb(220, 220, 170);">len</span>();
+	<span style="color: rgb(197, 134, 192);">let</span> field_width = field[<span style="color: rgb(181, 206, 168);">0</span>].<span style="color: rgb(220, 220, 170);">len</span>();
+
+	<span style="color: rgb(197, 134, 192);">for</span> field_row <span style="color: rgb(197, 134, 192);">in</span> <span style="color: rgb(181, 206, 168);">0</span>..field_height {
+		<span style="color: rgb(197, 134, 192);">for</span> field_col <span style="color: rgb(197, 134, 192);">in</span> <span style="color: rgb(181, 206, 168);">0</span>..field_width {
+			atlas[atlas_row + field_row][atlas_col + field_col] = <span style="color: rgb(78, 201, 176);">Some</span>(field[glyph_row][glyph_col]);
+		}
+	}
+}
+
+<span style="color: rgb(197, 134, 192);">fn</span> <span style="color: rgb(220, 220, 170);">expand_atlas</span>(atlas: &<span style="color: rgb(197, 134, 192);">mut</span> <span style="color: rgb(78, 201, 176);">Vec</span>&lt;<span style="color: rgb(78, 201, 176);">Vec</span>&lt;<span style="color: rgb(78, 201, 176);">Option</span>&lt;<span style="color: rgb(78, 201, 176);">u8</span>&gt;&gt;&gt;, vertical_len: <span style="color: rgb(78, 201, 176);">usize</span>, horizontal_len: <span style="color: rgb(78, 201, 176);">usize</span>) {
+	<span style="color: rgb(197, 134, 192);">let</span> atlas_width = <span style="color: rgb(197, 134, 192);">if</span> atlas.<span style="color: rgb(220, 220, 170);">len</span>() == <span style="color: rgb(181, 206, 168);">0</span> { <span style="color: rgb(181, 206, 168);">0</span> } <span style="color: rgb(197, 134, 192);">else</span> { atlas[<span style="color: rgb(181, 206, 168);">0</span>].<span style="color: rgb(220, 220, 170);">len</span>() };
+	<span style="color: rgb(197, 134, 192);">let</span> additional_rows = vec![vec![<span style="color: rgb(79,  193, 255);">None</span>; atlas_width]; vertical_len];
+	atlas.<span style="color: rgb(220, 220, 170);">extend_from_slice</span>(&additional_rows);
+
+	<span style="color: rgb(197, 134, 192);">let</span> additional_cols = vec![<span style="color: rgb(79,  193, 255);">None</span>; horizontal_len];
+	<span style="color: rgb(197, 134, 192);">for</span> row <span style="color: rgb(197, 134, 192);">in</span> atlas {
+		row.<span style="color: rgb(220, 220, 170);">extend_from_slice</span>(&additional_cols);
+	}
+}
+</code></pre>
+<p>I've decided to use an <code class="inline_code">Option&lt;u8&gt;</code> for the type of each texel in the atlas. A value of <code class="inline_code">None</code> means that texel is free, whereas <code class="inline_code">Some(u8)</code> indicates the texel is taken. At the end, any texel with a value of <code class="inline_code">None</code> becomes zero so the final type of the atlas is  <code class="inline_code">Vec&lt;Vec&lt;u8&gt;&gt;&gt;</code>. <a href="https://doc.rust-lang.org/std/primitive.u32.html#method.saturating_sub">saturating_sub()</a> is used throughout the code which simply prevents the result from being negative.</p>
+
+</body>
+</html>
